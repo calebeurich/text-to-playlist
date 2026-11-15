@@ -57,6 +57,7 @@ def _run(profile: str, args: list[str], stdin: str | None = None, timeout: int =
             out, err = p.communicate(stdin, timeout=1)
             break
         except subprocess.TimeoutExpired:
+            stdin = None  # already handed over; passing it again on the next poll is an error
             if cancel and cancel():
                 p.kill()
                 p.communicate()

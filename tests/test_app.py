@@ -321,6 +321,8 @@ def test_run_can_be_cancelled_and_times_out(monkeypatch, tmp_path):
     real_popen = sandbox.subprocess.Popen
     monkeypatch.setattr(sandbox.subprocess, "Popen", lambda cmd, **kw: real_popen([sys.executable, *cmd[4:]], **kw))
     assert sandbox._run("p", ["-c", "import sys; print(sys.stdin.read().upper())"], stdin="hi").strip() == "HI"
+    slow = "import sys, time; data = sys.stdin.read(); time.sleep(2.5); print(data.upper())"
+    assert sandbox._run("p", ["-c", slow], stdin="slow").strip() == "SLOW"  # spans several polls
     with pytest.raises(sandbox.Cancelled):
         sandbox._run("p", ["-c", "import time; time.sleep(30)"], cancel=lambda: True)
     with pytest.raises(sandbox.SandboxError, match="Gave up"):
