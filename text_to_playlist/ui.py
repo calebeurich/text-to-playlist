@@ -52,37 +52,110 @@ def choose(prompt: str, items: list[str], multiple: bool = True, preselect: str 
     return [int(m[1]) - 1 for line in out.split("\n") if (m := re.match(r"(\d+)\. ", line))]
 
 
-class progress:
-    """A 'working...' window with a Stop button. It re-reads progress.txt every few seconds
-    and stays up until close() is called."""
+# A real window with a progress bar that updates in place (JavaScript for Automation + Cocoa).
+# It re-reads the status file twice a second and never re-activates itself, so it does not
+# jump in front of whatever else you are doing.
+PROGRESS_WINDOW_JS = r"""
+ObjC.import('Cocoa');
+function run(argv) {
+  var title = argv[0], statusPath = argv[1], stopped = false;
+  ObjC.registerSubclass({
+    name: 'TTPStopTarget',
+    methods: {'stop:': {types: ['void', ['id']], implementation: function (sender) { stopped = true; }}}
+  });
+  var target = $.TTPStopTarget.alloc.init;
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy(1);  // accessory: a window, but no Dock icon
+  app.finishLaunching;
 
-    SCRIPT = (
-        'on run argv\n'
-        'tell me to activate\n'
-        'repeat\n'
-        'set t to item 1 of argv\n'
-        'try\n'
-        'set t to t & return & return & (do shell script "cat " & quoted form of (item 2 of argv))\n'
-        'end try\n'
-        'set r to display dialog t with title "Text to Playlist" buttons {"Stop"} giving up after 6\n'
-        'if gave up of r is false then return "stop"\n'
-        'end repeat\n'
-        'end run'
-    )
+  var win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(0, 0, 460, 170), 1, 2, false);
+  win.setTitle('Text to Playlist');
+  win.center;
+  var heading = $.NSTextField.wrappingLabelWithString(title);
+  heading.setFrame($.NSMakeRect(20, 110, 420, 44));
+  var status = $.NSTextField.labelWithString('Starting...');
+  status.setFrame($.NSMakeRect(20, 82, 420, 20));
+  var bar = $.NSProgressIndicator.alloc.initWithFrame($.NSMakeRect(20, 56, 420, 20));
+  bar.setMinValue(0);
+  bar.setMaxValue(100);
+  bar.setIndeterminate(true);
+  bar.startAnimation(null);
+  var button = $.NSButton.buttonWithTitleTargetAction('Stop', target, 'stop:');
+  button.setFrame($.NSMakeRect(350, 12, 90, 32));
+  var view = win.contentView;
+  view.addSubview(heading); view.addSubview(status); view.addSubview(bar); view.addSubview(button);
+  win.makeKeyAndOrderFront(null);
+  app.activateIgnoringOtherApps(true);
+
+  var mode = $('kCFRunLoopDefaultMode'), last = '';
+  while (!stopped) {
+    var until = $.NSDate.dateWithTimeIntervalSinceNow(0.5);
+    while (true) {
+      var e = app.nextEventMatchingMaskUntilDateInModeDequeue(4294967295, until, mode, true);
+      if (!e || e.isNil()) break;
+      app.sendEvent(e);
+    }
+    var raw = $.NSString.stringWithContentsOfFileEncodingError(statusPath, 4, null);
+    var text = (raw && !raw.isNil()) ? raw.js : '';
+    if (text && text !== last) {
+      last = text;
+      var step = text.split('\n')[0];
+      var m = text.match(/(\d+) of (\d+)/);
+      if (m && Number(m[2]) > 0) {
+        status.setStringValue(step + '  (' + m[1] + ' of ' + m[2] + ')');
+        bar.setIndeterminate(false);
+        bar.setDoubleValue(100 * Number(m[1]) / Number(m[2]));
+      } else {
+        status.setStringValue(step);
+        bar.setIndeterminate(true);
+        bar.startAnimation(null);
+      }
+    }
+  }
+  return 'stop';
+}
+"""
+
+# Used only if the window above fails to start: one plain dialog that never refreshes.
+PLAIN_DIALOG = (
+    'on run argv\n'
+    'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Stop"} giving up after 14400\n'
+    'end run'
+)
+
+
+class progress:
+    """A 'working...' window with a progress bar and a Stop button; stays up until close()."""
 
     def __init__(self, message: str):
         self.closed = False
+        self.fallback = False
+        self.message = message
         status = state.CONFIG_DIR / "progress.txt"
         try:
             status.unlink()
         except OSError:
             pass
-        self.proc = subprocess.Popen(["/usr/bin/osascript", "-e", self.SCRIPT, message, str(status)],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.proc = subprocess.Popen(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", PROGRESS_WINDOW_JS, message, str(status)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
     def stopped(self) -> bool:
-        """True once the user has pressed Stop (a crashed window does not count)."""
-        return not self.closed and self.proc.poll() == 0
+        """True once the user has pressed Stop. If the window itself failed, fall back to a plain dialog."""
+        code = self.proc.poll()
+        if self.closed or code is None:
+            return False
+        if code == 0:
+            return True
+        if not self.fallback:
+            self.fallback = True
+            err = self.proc.stderr.read() if self.proc.stderr else ""
+            state.log(f"progress window failed (code {code}): {err.strip()[-500:]}")
+            self.proc = subprocess.Popen(
+                ["/usr/bin/osascript", "-e", PLAIN_DIALOG,
+                 self.message + "\n\n(The progress bar could not be shown; this is still working.)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return False
 
     def close(self) -> None:
         self.closed = True
