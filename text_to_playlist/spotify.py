@@ -34,6 +34,15 @@ class SpotifyError(RuntimeError):
         self.status = status
 
 
+class SpotifyRateLimited(SpotifyError):
+    """Spotify told us to back off for longer than is worth waiting in place."""
+
+    def __init__(self, wait_seconds: int):
+        mins = max(1, round(wait_seconds / 60))
+        RuntimeError.__init__(self, f"Spotify is rate-limiting this app. Try again in about {mins} minute(s).")
+        self.status = 429
+
+
 def _http(method: str, url: str, *, headers=None, form=None, body=None) -> tuple[int, dict, dict]:
     data = None
     headers = dict(headers or {})
@@ -119,14 +128,18 @@ class Spotify:
 
     def _call(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
         url = f"{API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
-        for _ in range(5):
+        for _ in range(6):
+            time.sleep(0.05)  # stay well under Spotify's per-app request rate
             status, data, headers = _http(
                 method, url, headers={"Authorization": f"Bearer {self._access_token()}"}, body=body
             )
             if status != 429:
                 return data
-            time.sleep(min(int(headers.get("Retry-After", "2")), 30) + 1)
-        raise SpotifyError(429, "rate limited")
+            wait = int(headers.get("Retry-After", "2") or 2)
+            if wait > 90:  # a long penalty: stop cleanly instead of hammering on
+                raise SpotifyRateLimited(wait)
+            time.sleep(wait + 1)
+        raise SpotifyRateLimited(120)
 
     # ---- catalog ----------------------------------------------------------
     def search(self, query: str, kind: str, limit: int = 5) -> list[dict]:

@@ -68,21 +68,27 @@ def sync_messages(chat_key: str, chat_name: str, msgs: list[Message], sp, st: di
 def main(argv: list[str] | None = None) -> int:
     from .spotify import Spotify
 
+    from .spotify import SpotifyRateLimited
+
     command = (argv or sys.argv[1:])[0]
     payload = json.load(sys.stdin)
     cfg = state.load(CONFIG)
     extract.MODEL = cfg.get("model", extract.MODEL)
     sp, st = Spotify(cfg["spotify_client_id"]), state.load(STATE)
-    if command == "plan":
-        result = plan_messages(
-            payload["chat_key"], [Message(**m) for m in payload["messages"]], sp, st,
-            album_mode=cfg.get("album_mode", "singles"), album_tracks=cfg.get("album_tracks", 2),
-            api_key=cfg.get("anthropic_api_key"), notes=state.read_notes(),
-            log=lambda s: print(s, file=sys.stderr),
-        )
-        result["cost"], result["model"] = extract.cost_estimate(), extract.MODEL
-    else:
-        result = apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st)
+    try:
+        if command == "plan":
+            result = plan_messages(
+                payload["chat_key"], [Message(**m) for m in payload["messages"]], sp, st,
+                album_mode=cfg.get("album_mode", "singles"), album_tracks=cfg.get("album_tracks", 2),
+                api_key=cfg.get("anthropic_api_key"), notes=state.read_notes(),
+                log=lambda s: print(s, file=sys.stderr),
+            )
+            result["cost"], result["model"] = extract.cost_estimate(), extract.MODEL
+        else:
+            result = apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st)
+    except SpotifyRateLimited as e:
+        print(e, file=sys.stderr)
+        return 4
     json.dump(result, sys.stdout)
     return 0
 

@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 
 from . import extract
 from .links import Link, find_links
+from .spotify import SpotifyRateLimited
 
 ALBUM_MODES = ("singles", "first", "full")
 
@@ -114,6 +115,8 @@ def resolve(
     def guarded(label: str, fn) -> None:
         try:
             fn()
+        except SpotifyRateLimited:
+            raise  # every later lookup would fail the same way; stop the sync with a clear message
         except Exception as e:  # one bad link or lookup must not sink the whole sync
             out.unresolved.append(f"{label} ({type(e).__name__}: {e})")
 
@@ -209,6 +212,8 @@ def resolve(
                     out.items.append(Item(c["uri"], f"{c['name']} - {_artists(c)} (best guess for: {describe(rec)})",
                                           rec.message_id))
             misses = [rec for n, rec in enumerate(misses) if n not in picks]
+        except SpotifyRateLimited:
+            raise
         except Exception as e:
             out.notes.append(f"Second look at the misses failed ({type(e).__name__}: {e}).")
     out.unresolved += [describe(rec) for rec in misses]
