@@ -53,17 +53,23 @@ def choose(prompt: str, items: list[str], multiple: bool = True, preselect: str 
 
 
 class progress:
-    """A small 'working...' window that stays up until close() is called."""
+    """A small 'working...' window with a Stop button; stays up until close() is called."""
 
     def __init__(self, message: str):
+        self.closed = False
         self.proc = subprocess.Popen(
             ["/usr/bin/osascript", "-e",
              'on run argv\ntell me to activate\n'
-             'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Hide"} '
-             'default button 1 giving up after 3600\nend run', message],
+             'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Stop"} '
+             'giving up after 14400\nend run', message],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def stopped(self) -> bool:
+        """True once the user has pressed Stop."""
+        return not self.closed and self.proc.poll() is not None
+
     def close(self) -> None:
+        self.closed = True
         self.proc.terminate()
 
 

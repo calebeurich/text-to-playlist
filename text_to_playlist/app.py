@@ -105,11 +105,15 @@ def sync_chat(c: dict, cfg: dict) -> str:
         days = LOOKBACK[picked[0]][1]
         since = time.time() - days * 86400 if days else 0.0
 
-    busy = ui.progress(f"Reading '{name}' and finding the songs...\n\nThis can take a minute or two.")
+    busy = ui.progress(f"Reading '{name}' and finding the songs...\n\nA few minutes for a long history. "
+                       "Nothing is added to Spotify until you have seen the list.")
     try:
-        msgs = sandbox.read(["fetch", "--key", key, "--after", str(after), "--since", str(since)])
+        msgs = sandbox.read(["fetch", "--key", key, "--after", str(after), "--since", str(since)], cancel=busy.stopped)
         state.log(f"'{key}': {len(msgs)} new messages; planning")
-        plan = sandbox.syncer("plan", {"chat_key": key, "chat_name": name, "messages": msgs})
+        plan = sandbox.syncer("plan", {"chat_key": key, "chat_name": name, "messages": msgs}, cancel=busy.stopped)
+    except sandbox.Cancelled:
+        state.log(f"'{key}': stopped by user")
+        return f"{name}: stopped. Nothing was added; these messages will be offered again next time."
     finally:
         busy.close()
     state.log(f"'{key}': {len(plan['items'])} tracks found, {len(plan['unresolved'])} unmatched")

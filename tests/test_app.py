@@ -146,7 +146,7 @@ def test_app_flow(db, tmp_path, monkeypatch):
     db.msg(2, f"https://open.spotify.com/album/{A}", NOW - 50)
     sp, shown, prompts = FakeSpotify(), [], []
 
-    def fake_read(args):
+    def fake_read(args, cancel=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()) as err:
             code = reader.main([args[0], "--db", str(db.path), *args[1:]])
@@ -154,7 +154,7 @@ def test_app_flow(db, tmp_path, monkeypatch):
             raise sandbox.SandboxError(err.getvalue(), code)
         return json.loads(buf.getvalue())
 
-    def fake_syncer(command, payload):
+    def fake_syncer(command, payload, cancel=None):
         st = state.load("state.json")
         if command == "plan":
             msgs = [imessage.Message(**m) for m in payload["messages"]]
@@ -164,6 +164,7 @@ def test_app_flow(db, tmp_path, monkeypatch):
     class Busy:
         def __init__(self, m): pass
         def close(self): pass
+        def stopped(self): return False
 
     answers = {}
 
@@ -212,7 +213,7 @@ def test_app_flow(db, tmp_path, monkeypatch):
 
     # failing safety check stops before anything is read
     monkeypatch.setattr(sandbox, "verify_lockdown", lambda: ["leak"])
-    monkeypatch.setattr(sandbox, "read", lambda a: (_ for _ in ()).throw(AssertionError("must not read")))
+    monkeypatch.setattr(sandbox, "read", lambda a, cancel=None: (_ for _ in ()).throw(AssertionError("must not read")))
     assert app.main() == 3
 
 
@@ -306,3 +307,22 @@ def test_cost_estimate(monkeypatch):
     monkeypatch.setattr(extract, "MODEL", "claude-sonnet-5-5")
     monkeypatch.setattr(extract, "USAGE", {"input": 40_000, "output": 20_000})
     assert round(extract.cost_estimate(), 2) == 0.28
+
+
+def test_run_can_be_cancelled_and_times_out(monkeypatch, tmp_path):
+    import sys
+
+    import pytest
+
+    from text_to_playlist import sandbox
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(sandbox, "SANDBOX_EXEC", "/usr/bin/env")  # stand-in: `env -p x python ...` is not valid, so wrap
+    real_popen = sandbox.subprocess.Popen
+    monkeypatch.setattr(sandbox.subprocess, "Popen", lambda cmd, **kw: real_popen([sys.executable, *cmd[4:]], **kw))
+    assert sandbox._run("p", ["-c", "import sys; print(sys.stdin.read().upper())"], stdin="hi").strip() == "HI"
+    with pytest.raises(sandbox.Cancelled):
+        sandbox._run("p", ["-c", "import time; time.sleep(30)"], cancel=lambda: True)
+    with pytest.raises(sandbox.SandboxError, match="Gave up"):
+        sandbox._run("p", ["-c", "import time; time.sleep(30)"], timeout=1)
+    with pytest.raises(sandbox.SandboxError, match="boom"):
+        sandbox._run("p", ["-c", "import sys; sys.exit('boom')"])

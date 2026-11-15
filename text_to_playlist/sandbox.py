@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import state
@@ -22,6 +23,10 @@ class SandboxError(RuntimeError):
     def __init__(self, message: str, code: int = 1):
         super().__init__(message)
         self.code = code
+
+
+class Cancelled(Exception):
+    """The user pressed Stop."""
 
 
 def _q(path) -> str:
@@ -39,27 +44,40 @@ def syncer_profile() -> str:
     )
 
 
-def _run(profile: str, args: list[str], stdin: str | None = None, timeout: int = 3 * 3600) -> str:
+def _run(profile: str, args: list[str], stdin: str | None = None, timeout: int = 3 * 3600, cancel=None) -> str:
+    """cancel: optional function polled once a second; when it returns True the work is killed."""
     if not os.path.exists(SANDBOX_EXEC):
         raise SandboxError("macOS sandbox-exec not found; refusing to run unsandboxed.")
     state.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        p = subprocess.run([SANDBOX_EXEC, "-p", profile, sys.executable, *args], input=stdin, capture_output=True,
-                           text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise SandboxError(f"Gave up after {timeout // 60} minutes. Try a shorter lookback.") from None
+    p = subprocess.Popen([SANDBOX_EXEC, "-p", profile, sys.executable, *args], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            out, err = p.communicate(stdin, timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel and cancel():
+                p.kill()
+                p.communicate()
+                raise Cancelled() from None
+            if time.time() > deadline:
+                p.kill()
+                p.communicate()
+                raise SandboxError(f"Gave up after {timeout // 60} minutes. Try a shorter lookback.") from None
     if p.returncode != 0:
-        raise SandboxError(p.stderr.strip()[-1500:] or f"exit code {p.returncode}", p.returncode)
-    return p.stdout
+        raise SandboxError(err.strip()[-1500:] or f"exit code {p.returncode}", p.returncode)
+    return out
 
 
-def read(args: list[str]) -> list[dict]:
-    return json.loads(_run(READER_PROFILE, ["-m", "text_to_playlist.reader", *args]))
+def read(args: list[str], cancel=None) -> list[dict]:
+    return json.loads(_run(READER_PROFILE, ["-m", "text_to_playlist.reader", *args], cancel=cancel))
 
 
-def syncer(command: str, payload: dict) -> dict:
+def syncer(command: str, payload: dict, cancel=None) -> dict:
     """command is "plan" (find the tracks, change nothing) or "apply" (add chosen tracks)."""
-    return json.loads(_run(syncer_profile(), ["-m", "text_to_playlist.syncer", command], stdin=json.dumps(payload)))
+    return json.loads(_run(syncer_profile(), ["-m", "text_to_playlist.syncer", command], stdin=json.dumps(payload),
+                           cancel=cancel))
 
 
 NET_PROBE = "import socket; socket.create_connection(('api.spotify.com', 443), timeout=8).close()"
