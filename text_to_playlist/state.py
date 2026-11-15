@@ -47,3 +47,14 @@ def load_allowed() -> list[str]:
 def save_allowed(keys: list[str]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     allowed_file().write_text(json.dumps(sorted(set(keys)), indent=2))
+
+
+def log(message: str) -> None:
+    """Append a line to app.log so there is a record of what the app did and where it stopped."""
+    import time
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_DIR / "app.log", "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n")
+    except OSError:
+        pass

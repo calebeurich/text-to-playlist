@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
+import traceback
 
 from . import sandbox, state, ui
 from .spotify import REDIRECT_URI
@@ -45,6 +46,7 @@ def read_or_explain(args: list[str]) -> list[dict] | None:
     try:
         return sandbox.read(args)
     except sandbox.SandboxError as e:
+        state.log(f"reading Messages failed (code {e.code}): {e}")
         if e.code == 2:
             if ui.alert("Text to Playlist needs permission to read Messages.\n\nIn the window that opens, switch on "
                         "'Text to Playlist' under Full Disk Access, then open the app again.",
@@ -72,12 +74,15 @@ def pick_allowed(cfg: dict) -> list[str] | None:
     return keys
 
 
-def main() -> int:
+def run() -> int:
+    state.log("--- app opened")
     cfg = state.load(CONFIG)
     if not cfg.get("spotify_client_id") and not first_run(cfg):
         return 1
 
+    state.log("setup present; running safety check")
     problems = sandbox.verify_lockdown()
+    state.log(f"safety check: {problems or 'passed'}")
     if problems:
         ui.alert("Stopped: the safety check failed, so nothing was read or sent.\n\n" + "\n".join(problems))
         return 3
@@ -87,6 +92,7 @@ def main() -> int:
     todo = read_or_explain(["list"])  # allowed chats only
     if todo is None:
         return 2
+    state.log(f"allowed chats found: {len(todo)}")
 
     st = state.load(STATE)
     ui.notify(f"Checking {len(todo)} chat(s) for new song recs...")
@@ -96,8 +102,11 @@ def main() -> int:
         since = 0 if after else time.time() - cfg.get("since_days", 90) * 86400
         try:
             msgs = sandbox.read(["fetch", "--key", c["key"], "--after", str(after), "--since", str(since)])
+            state.log(f"chat {todo.index(c) + 1}: {len(msgs)} new messages; syncing")
             results.append(sandbox.sync({"chat_key": c["key"], "chat_name": c["name"], "messages": msgs}))
+            state.log(f"chat {todo.index(c) + 1}: added {len(results[-1]['added'])} tracks")
         except sandbox.SandboxError as e:
+            state.log(f"sync failed: {e}")
             ui.alert(f"Syncing '{c['name']}' failed:\n\n{e}")
             return 1
 
@@ -109,6 +118,17 @@ def main() -> int:
     elif choice == "Change chats":
         pick_allowed(cfg)
     return 0
+
+
+def main() -> int:
+    try:
+        code = run()
+        state.log(f"finished with code {code}")
+        return code
+    except Exception:
+        state.log(traceback.format_exc())
+        ui.alert("Text to Playlist hit an unexpected error and stopped.\n\n" + traceback.format_exc()[-600:])
+        return 1
 
 
 if __name__ == "__main__":

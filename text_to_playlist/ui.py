@@ -4,10 +4,16 @@ from __future__ import annotations
 import re
 import subprocess
 
+from . import state
+
 
 def _osa(script: str, *args: str) -> str | None:
     p = subprocess.run(["/usr/bin/osascript", "-e", script, *args], capture_output=True, text=True)
-    return p.stdout.rstrip("\n") if p.returncode == 0 else None  # non-zero = user cancelled
+    if p.returncode != 0:
+        if "-128" not in p.stderr:  # -128 is the user pressing Cancel
+            state.log(f"dialog failed: {p.stderr.strip()}")
+        return None
+    return p.stdout.rstrip("\n")
 
 
 def choose(prompt: str, items: list[str]) -> list[int]:
