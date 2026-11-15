@@ -16,31 +16,55 @@ def _osa(script: str, *args: str) -> str | None:
     return p.stdout.rstrip("\n")
 
 
-# Builds an AppleScript list from argv items 2..n (argv item 1 is always the prompt).
-ARGS_TO_LIST = (
-    'set opts to {}\n'
-    'repeat with i from 2 to (count of argv)\n'
-    'set end of opts to (item i of argv) as text\n'
-    'end repeat\n'
-)
+def _args_to_list(first: int) -> str:
+    """AppleScript that collects argv items first..n into the list `opts`."""
+    return ('set opts to {}\n'
+            f'repeat with i from {first} to (count of argv)\n'
+            'set end of opts to (item i of argv) as text\n'
+            'end repeat\n')
 
 
-def choose(prompt: str, items: list[str]) -> list[int]:
-    """Show a pick-list; returns the chosen indexes (empty if cancelled)."""
+def choose(prompt: str, items: list[str], multiple: bool = True, preselect: str = "none") -> list[int] | None:
+    """Show a pick-list. Returns chosen indexes, [] if nothing was ticked, None if cancelled.
+    preselect is "none", "first" or "all"."""
     numbered = [f"{i}. {s}" for i, s in enumerate(items, 1)]
+    mode = "with multiple selections allowed and empty selection allowed" if multiple \
+        else "without multiple selections allowed"
     out = _osa(
-        'on run argv\n' + ARGS_TO_LIST +
+        'on run argv\n' + _args_to_list(3) +
+        'set defs to {}\n'
+        'if (item 2 of argv) is "all" then set defs to opts\n'
+        'if (item 2 of argv) is "first" then set defs to {item 1 of opts}\n'
         'tell me to activate\n'
+        'if (count of defs) is 0 then\n'
+        f'set picked to choose from list opts with title "Text to Playlist" with prompt (item 1 of argv) {mode}\n'
+        'else\n'
         'set picked to choose from list opts with title "Text to Playlist" '
-        'with prompt (item 1 of argv) with multiple selections allowed\n'
+        f'with prompt (item 1 of argv) default items defs {mode}\n'
+        'end if\n'
         'if picked is false then error number -128\n'
         "set AppleScript's text item delimiters to linefeed\n"
         'return picked as text\nend run',
-        prompt, *numbered,
+        prompt, preselect, *numbered,
     )
-    if not out:
-        return []
+    if out is None:
+        return None
     return [int(m[1]) - 1 for line in out.split("\n") if (m := re.match(r"(\d+)\. ", line))]
+
+
+class progress:
+    """A small 'working...' window that stays up until close() is called."""
+
+    def __init__(self, message: str):
+        self.proc = subprocess.Popen(
+            ["/usr/bin/osascript", "-e",
+             'on run argv\ntell me to activate\n'
+             'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Hide"} '
+             'default button 1 giving up after 3600\nend run', message],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def close(self) -> None:
+        self.proc.terminate()
 
 
 def ask(prompt: str, hidden: bool = False) -> str | None:
@@ -55,7 +79,7 @@ def ask(prompt: str, hidden: bool = False) -> str | None:
 def alert(message: str, buttons: tuple[str, ...] = ("OK",)) -> str | None:
     """Returns the button pressed. The last button is the default."""
     return _osa(
-        'on run argv\n' + ARGS_TO_LIST +
+        'on run argv\n' + _args_to_list(2) +
         'tell me to activate\n'
         'set answer to display dialog (item 1 of argv) with title "Text to Playlist" '
         'buttons opts default button (last item of opts)\n'

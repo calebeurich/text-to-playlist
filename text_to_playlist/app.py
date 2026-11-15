@@ -1,10 +1,11 @@
-"""The double-click app: pick a chat from a list, and its recs land in a Spotify playlist.
+"""The double-click app: a small menu, a review list, and your recs land in Spotify.
 
 This process only shows dialogs and passes data between the two sandboxed halves
 (see sandbox.py). It never opens the message database or the network itself.
 """
 from __future__ import annotations
 
+import fcntl
 import sys
 import time
 import traceback
@@ -14,6 +15,11 @@ from .spotify import REDIRECT_URI
 
 CONFIG, STATE = "config.json", "state.json"
 FDA_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+LOOKBACK = [("Last 30 days", 30), ("Last 3 months", 90), ("Last 6 months", 182), ("Last year", 365),
+            ("Everything", None)]
+ALBUMS = [("1 best-known track per album", "singles", 1), ("2 best-known tracks per album", "singles", 2),
+          ("3 best-known tracks per album", "singles", 3), ("First track of each album", "first", 1),
+          ("The whole album", "full", 2)]
 
 
 def first_run(cfg: dict) -> bool:
@@ -28,18 +34,6 @@ def first_run(cfg: dict) -> bool:
         cfg["anthropic_api_key"] = key.strip()
     state.save(CONFIG, cfg)
     return True
-
-
-def summarize(results: list[dict]) -> str:
-    lines = []
-    for r in results:
-        lines.append(f"{r['chat']}: added {len(r['added'])} track(s) from {r['messages']} new message(s).")
-        lines += [f"  + {x}" for x in r["added"][:15]]
-        if len(r["added"]) > 15:
-            lines.append(f"  ...and {len(r['added']) - 15} more")
-        lines += [f"  ? no match: {x}" for x in r["unresolved"][:8]]
-        lines += [f"  ! {x}" for x in r["notes"][:4]]
-    return "\n".join(lines)
 
 
 def read_or_explain(args: list[str]) -> list[dict] | None:
@@ -57,30 +51,108 @@ def read_or_explain(args: list[str]) -> list[dict] | None:
         return None
 
 
-def pick_allowed(cfg: dict) -> list[str] | None:
+def pick_allowed(cfg: dict) -> bool:
     """Let the user choose which chats the app may ever read. Only chat names are loaded here."""
     chats = read_or_explain(["list", "--all"] + (["--dms"] if cfg.get("include_dms") else []))
     if chats is None:
-        return None
-    shown = chats[: cfg.get("list_size", 40)]
+        return False
+    shown = chats[: cfg.get("list_size", 200)]
     current = set(state.load_allowed())
     labels = [("★ " if c["key"] in current else "") + c["name"][:70] for c in shown]
     picked = ui.choose("Which chats may this app read? It will never open any other chat.\n"
-                       "(Hold Command to select more than one. ★ = currently allowed.)", labels)
+                       "Most recent first. Hold Command to tick more than one. ★ = currently allowed.", labels)
     if not picked:
-        return None
-    keys = [shown[i]["key"] for i in picked]
-    state.save_allowed(keys)
-    return keys
+        return False
+    state.save_allowed([shown[i]["key"] for i in picked])
+    state.log(f"allowed chats set: {len(picked)}")
+    return True
+
+
+def album_label(cfg: dict) -> str:
+    mode, n = cfg.get("album_mode", "singles"), cfg.get("album_tracks", 2)
+    return next((label for label, m, k in ALBUMS if m == mode and (k == n or m == "full")), ALBUMS[1][0])
+
+
+def menu(cfg: dict, n_chats: int) -> str | None:
+    items = [
+        f"Sync now ({n_chats} chat{'s' if n_chats != 1 else ''})",
+        "Choose which chats to read...",
+        f"Review songs before adding: {'ON' if cfg.get('review', True) else 'OFF'}",
+        f"Albums: {album_label(cfg)}",
+        "Start a chat over (re-read it into a new playlist)...",
+    ]
+    picked = ui.choose("What would you like to do?", items, multiple=False, preselect="first")
+    return ["sync", "chats", "review", "albums", "reset"][picked[0]] if picked else None
+
+
+def sync_chat(c: dict, cfg: dict) -> str:
+    """Sync one chat; returns a summary for the final dialog."""
+    name, key = c["name"], c["key"]
+    after = state.load(STATE).get("chats", {}).get(key, {}).get("last_rowid", 0)
+    since = 0.0
+    if not after:
+        picked = ui.choose(f"First time reading '{name}'.\nHow far back should I look for song recs?",
+                           [label for label, _ in LOOKBACK], multiple=False, preselect="first")
+        if not picked:
+            return f"{name}: skipped."
+        days = LOOKBACK[picked[0]][1]
+        since = time.time() - days * 86400 if days else 0.0
+
+    busy = ui.progress(f"Reading '{name}' and finding the songs...\n\nThis can take a minute or two.")
+    try:
+        msgs = sandbox.read(["fetch", "--key", key, "--after", str(after), "--since", str(since)])
+        state.log(f"'{key}': {len(msgs)} new messages; planning")
+        plan = sandbox.syncer("plan", {"chat_key": key, "chat_name": name, "messages": msgs})
+    finally:
+        busy.close()
+    state.log(f"'{key}': {len(plan['items'])} tracks found, {len(plan['unresolved'])} unmatched")
+
+    items = plan["items"]
+    if items and cfg.get("review", True):
+        picked = ui.choose(
+            f"{name}: found {len(items)} song(s) in {plan['messages']} new message(s).\n"
+            "Everything ticked will be added. Command-click to untick anything you don't want.",
+            [i["label"][:90] for i in items], preselect="all")
+        if picked is None:
+            return f"{name}: cancelled, nothing added. These messages will be offered again next time."
+        items = [items[i] for i in picked]
+
+    busy = ui.progress(f"Adding {len(items)} song(s) to the '{name}' playlist...")
+    try:
+        done = sandbox.syncer("apply", {"chat_key": key, "chat_name": name, "items": items,
+                                        "last_rowid": plan["last_rowid"]})
+    finally:
+        busy.close()
+    state.log(f"'{key}': added {len(done['added'])} tracks")
+
+    lines = [f"{name}: added {len(done['added'])} song(s) from {plan['messages']} new message(s)."]
+    lines += [f"  ? couldn't find: {x}" for x in plan["unresolved"][:10]]
+    lines += [f"  ! {x[:110]}" for x in plan["notes"][:5]]
+    if done.get("playlist_url"):
+        lines.append(f"  {done['playlist_url']}")
+    return "\n".join(lines)
+
+
+def reset_chat() -> None:
+    st = state.load(STATE)
+    chats = list(st.get("chats", {}).items())
+    if not chats:
+        ui.alert("No chat has been synced yet.")
+        return
+    picked = ui.choose("Which chat should start over?\nIts next sync re-reads it and makes a new playlist.",
+                       [v.get("name", k) for k, v in chats], multiple=False)
+    if picked:
+        del st["chats"][chats[picked[0]][0]]
+        state.save(STATE, st)
+        ui.alert("Done. The old playlist is still in Spotify; delete it there if you don't want it.")
 
 
 def run() -> int:
     state.log("--- app opened")
     cfg = state.load(CONFIG)
     if not cfg.get("spotify_client_id") and not first_run(cfg):
-        return 1
+        return 0
 
-    state.log("setup present; running safety check")
     problems = sandbox.verify_lockdown()
     state.log(f"safety check: {problems or 'passed'}")
     if problems:
@@ -89,35 +161,42 @@ def run() -> int:
 
     if not state.load_allowed() and not pick_allowed(cfg):
         return 2
-    todo = read_or_explain(["list"])  # allowed chats only
-    if todo is None:
-        return 2
-    state.log(f"allowed chats found: {len(todo)}")
 
-    st = state.load(STATE)
-    ui.notify(f"Checking {len(todo)} chat(s) for new song recs...")
-    results = []
-    for c in todo:
-        after = st.get("chats", {}).get(c["key"], {}).get("last_rowid", 0)
-        since = 0 if after else time.time() - cfg.get("since_days", 90) * 86400
+    while True:
+        chats = read_or_explain(["list"])  # allowed chats only
+        if chats is None:
+            return 2
+        action = menu(cfg, len(chats))
+        state.log(f"menu: {action}")
+        if action is None:
+            return 0
+        if action == "chats":
+            pick_allowed(cfg)
+        elif action == "review":
+            cfg["review"] = not cfg.get("review", True)
+            state.save(CONFIG, cfg)
+        elif action == "albums":
+            picked = ui.choose("When someone recommends a whole album, add:", [a[0] for a in ALBUMS], multiple=False)
+            if picked:
+                _, cfg["album_mode"], cfg["album_tracks"] = ALBUMS[picked[0]]
+                state.save(CONFIG, cfg)
+        elif action == "reset":
+            reset_chat()
+        else:
+            break
+
+    summaries = []
+    for c in chats:
         try:
-            msgs = sandbox.read(["fetch", "--key", c["key"], "--after", str(after), "--since", str(since)])
-            state.log(f"chat {todo.index(c) + 1}: {len(msgs)} new messages; syncing")
-            results.append(sandbox.sync({"chat_key": c["key"], "chat_name": c["name"], "messages": msgs}))
-            state.log(f"chat {todo.index(c) + 1}: added {len(results[-1]['added'])} tracks")
+            summaries.append(sync_chat(c, cfg))
         except sandbox.SandboxError as e:
             state.log(f"sync failed: {e}")
-            ui.alert(f"Syncing '{c['name']}' failed:\n\n{e}")
-            return 1
-
-    urls = [r["playlist_url"] for r in results if r.get("playlist_url")]
-    buttons = ("Change chats", "Open playlist", "Done") if len(urls) == 1 else ("Change chats", "Done")
-    choice = ui.alert(summarize(results) or "No allowed chats found.", buttons)
-    if choice == "Open playlist":
+            summaries.append(f"{c['name']}: FAILED.\n  {str(e)[-300:]}")
+    urls = [u for u in (state.load(STATE).get("chats", {}).get(c["key"], {}).get("playlist_url") for c in chats) if u]
+    buttons = ("Open playlist", "Done") if len(urls) == 1 else ("Done",)
+    if ui.alert("\n\n".join(summaries) or "No chats to sync.", buttons) == "Open playlist":
         ui.open_url(urls[0])
-    elif choice == "Change chats":
-        pick_allowed(cfg)
-    return 0
+    return 1 if any("FAILED" in s for s in summaries) else 0
 
 
 def copy_report() -> None:
@@ -130,6 +209,13 @@ def copy_report() -> None:
 
 
 def main() -> int:
+    state.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(state.CONFIG_DIR / "app.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        ui.alert("Text to Playlist is already running. Look for its window, or wait for it to finish.")
+        return 0
     try:
         code = run()
         state.log(f"finished with code {code}")
@@ -142,7 +228,7 @@ def main() -> int:
         return code
     if code not in (0, 2):
         copy_report()
-        ui.alert("That didn't finish. A report is on your clipboard: paste it into your chat with Claude.")
+        ui.alert("That didn't fully work. A report is on your clipboard: paste it into your chat with Claude.")
     return code
 
 

@@ -54,8 +54,9 @@ def read(args: list[str]) -> list[dict]:
     return json.loads(_run(READER_PROFILE, ["-m", "text_to_playlist.reader", *args]))
 
 
-def sync(payload: dict) -> dict:
-    return json.loads(_run(syncer_profile(), ["-m", "text_to_playlist.syncer"], stdin=json.dumps(payload)))
+def syncer(command: str, payload: dict) -> dict:
+    """command is "plan" (find the tracks, change nothing) or "apply" (add chosen tracks)."""
+    return json.loads(_run(syncer_profile(), ["-m", "text_to_playlist.syncer", command], stdin=json.dumps(payload)))
 
 
 NET_PROBE = "import socket; socket.create_connection(('api.spotify.com', 443), timeout=8).close()"

@@ -141,7 +141,8 @@ def test_app_flow(db, tmp_path, monkeypatch):
     state.save("config.json", {"spotify_client_id": "cid"})
     db.chat(1, "Music Heads")
     db.chat(2, "Other")
-    db.msg(1, f"https://open.spotify.com/track/{T}", NOW - 100)
+    db.msg(1, f"https://open.spotify.com/track/{T} https://open.spotify.com/album/{A}", NOW - 100)
+    db.msg(1, "ancient", NOW - 300 * 86400)
     db.msg(2, f"https://open.spotify.com/album/{A}", NOW - 50)
     sp, shown, prompts = FakeSpotify(), [], []
 
@@ -153,33 +154,89 @@ def test_app_flow(db, tmp_path, monkeypatch):
             raise sandbox.SandboxError(err.getvalue(), code)
         return json.loads(buf.getvalue())
 
-    def fake_sync(payload):
-        msgs = [imessage.Message(**m) for m in payload["messages"]]
-        return syncer.sync_messages(payload["chat_key"], payload["chat_name"], msgs, sp, state.load("state.json"))
+    def fake_syncer(command, payload):
+        st = state.load("state.json")
+        if command == "plan":
+            msgs = [imessage.Message(**m) for m in payload["messages"]]
+            return syncer.plan_messages(payload["chat_key"], msgs, sp, st, album_mode="first", album_tracks=1)
+        return syncer.apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st)
 
-    def fake_choose(prompt, items):
-        prompts.append(prompt)
-        return [items.index("Music Heads")]
+    class Busy:
+        def __init__(self, m): pass
+        def close(self): pass
+
+    answers = {}
+
+    def fake_choose(prompt, items, multiple=True, preselect="none"):
+        prompts.append(prompt.split("\n")[0])
+        for start, fn in answers.items():
+            if prompt.startswith(start):
+                return fn(items)
+        raise AssertionError(f"unexpected dialog: {prompt}")
 
     monkeypatch.setattr(sandbox, "read", fake_read)
-    monkeypatch.setattr(sandbox, "sync", fake_sync)
+    monkeypatch.setattr(sandbox, "syncer", fake_syncer)
     monkeypatch.setattr(sandbox, "verify_lockdown", lambda: [])
-    monkeypatch.setattr(ui, "notify", lambda m: None)
+    monkeypatch.setattr(ui, "progress", Busy)
     monkeypatch.setattr(ui, "alert", lambda m, buttons=("OK",): shown.append(m))
     monkeypatch.setattr(ui, "choose", fake_choose)
 
-    # first launch: choose allowed chats, then only that chat is synced
+    # first launch: allow one chat, sync it, look back 30 days, untick the album track in review
+    answers.update({
+        "Which chats may": lambda items: [items.index("Music Heads")],
+        "What would you": lambda items: [0],
+        "First time reading": lambda items: [0],
+        "Music Heads: found 2": lambda items: [0],
+    })
     assert app.main() == 0
-    assert state.load_allowed() == ["name:Music Heads"] and len(prompts) == 1
-    assert sp.added == ["spotify:track:" + T] and "added 1 track(s)" in shown[-1] and "Other" not in shown[-1]
+    assert state.load_allowed() == ["name:Music Heads"]
+    assert sp.added == ["spotify:track:" + T] and sp.playlists == ["Music Heads recs"]
+    assert "added 1 song(s) from 1 new message(s)" in shown[-1] and "Other" not in shown[-1]
 
-    # later launches: no picker, nothing re-added
-    assert app.main() == 0 and len(prompts) == 1 and len(sp.added) == 1
+    # second launch: nothing new, no lookback question, no second playlist
+    n = len(prompts)
+    assert app.main() == 0 and prompts[n:] == ["What would you like to do?"]
+    assert len(sp.added) == 1 and len(sp.playlists) == 1
+
+    # cancelling the review adds nothing and offers the messages again next time
+    db.msg(1, f"https://open.spotify.com/album/{A}", NOW - 5)
+    answers["Music Heads: found 1"] = lambda items: None
+    assert app.main() == 0 and len(sp.added) == 1 and "cancelled" in shown[-1]
+    answers["Music Heads: found 1"] = lambda items: [0]
+    assert app.main() == 0 and sp.added[-1] == "spotify:track:blonde1"
+
+    # toggling review off from the menu, then quitting
+    seq = iter([[2], None])
+    answers["What would you"] = lambda items: next(seq)
+    assert app.main() == 0 and state.load("config.json")["review"] is False
 
     # failing safety check stops before anything is read
     monkeypatch.setattr(sandbox, "verify_lockdown", lambda: ["leak"])
     monkeypatch.setattr(sandbox, "read", lambda a: (_ for _ in ()).throw(AssertionError("must not read")))
     assert app.main() == 3
+
+
+def test_playlist_id_saved_before_tracks_are_added(tmp_path, monkeypatch):
+    from text_to_playlist import syncer
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    sp = FakeSpotify()
+    sp.add_tracks = lambda pid, uris: (_ for _ in ()).throw(RuntimeError("network down"))
+    items = [{"uri": "spotify:track:x", "label": "X"}]
+    try:
+        syncer.apply_items("k", "Chat", items, 5, sp, state.load("state.json"))
+    except RuntimeError:
+        pass
+    sp2 = FakeSpotify()
+    syncer.apply_items("k", "Chat", items, 5, sp2, state.load("state.json"))
+    assert sp.playlists == ["Chat recs"] and sp2.playlists == [] and sp2.added == ["spotify:track:x"]
+
+
+def test_bare_band_name_falls_back_to_artist():
+    sp = FakeSpotify()
+    r = resolve.resolve(sp, [], [extract.Rec(kind="track", title="Big Thief", artist="", message_id=1),
+                                 extract.Rec(kind="track", title="Vampire", artist="Big Thief", message_id=1)],
+                        use_llm=False)
+    assert [i.uri for i in r.items] == ["spotify:track:vamp"] and r.unresolved == []
 
 
 def test_contact_names_label_unnamed_chats(db, tmp_path):

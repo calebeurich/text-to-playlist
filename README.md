@@ -31,13 +31,18 @@ It understands Spotify links, Apple Music links, and plain-text recs ("you have 
 
 ## Use
 
-The first launch asks which chats the app may read. After that, opening the app checks those chats and
-adds any new recs to their playlists, with no questions. The result dialog has a "Change chats" button.
+The first launch asks which chats the app may read. After that, opening the app shows a short menu:
 
-Settings live in `~/.config/text-to-playlist/config.json`: `album_mode` (`singles`, `first` or `full`),
-`album_tracks` (default 2), `since_days` (how far back the first sync of a chat looks, default 90),
-`include_dms` (offer one-to-one chats when choosing), `model` (Claude model, default
-`claude-haiku-5-5`, the cheapest; `claude-opus-5-5` is stronger on vague recs).
+- **Sync now**: checks your chats for new recs. The first time it reads a chat it asks how far back to
+  look. It then shows the songs it found, all ticked; untick any you don't want and press OK.
+- **Choose which chats to read**: change the allow-list.
+- **Review songs before adding**: switch the review list off to add everything without asking.
+- **Albums**: how many tracks to take when someone recommends a whole album.
+- **Start a chat over**: forget a chat so its next sync re-reads it into a new playlist.
+
+Other settings live in `~/.config/text-to-playlist/config.json`: `include_dms` (offer one-to-one chats when
+choosing), `model` (Claude model, default `claude-haiku-5-5`, the cheapest; `claude-opus-5-5` is stronger on
+vague recs).
 
 Album modes: `singles` asks Claude to pick the album's best-known tracks from its real track list,
 `first` takes the opening tracks, `full` adds the whole album.

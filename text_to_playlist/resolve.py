@@ -46,6 +46,8 @@ def best_match(candidates: list[dict], title: str, artist: str) -> dict | None:
     for c in candidates:
         t = sim(c["name"], title) if title else 1.0
         a = max((sim(x["name"], artist) for x in c.get("artists", [])), default=0.0) if artist else 1.0
+        if artist and a >= 0.8 and norm(title) and norm(title) in norm(c["name"]):
+            t = max(t, 0.6)  # right artist, and the rec is a shortened form of the real title
         if t >= 0.6 and a >= 0.5 and t + a > best_score:
             best, best_score = c, t + a
     return best
@@ -124,20 +126,24 @@ def resolve(
         else:
             out.notes.append(f"Skipped {link.kind} link: {link.url}")
 
+    def add_artist(name: str) -> bool:
+        hits = [t for t in sp.search(f'artist:"{name}"', "track", limit=10)
+                if any(sim(x["name"], name) >= 0.8 for x in t.get("artists", []))]
+        for t in hits[:album_tracks]:
+            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}"))
+        return bool(hits)
+
     def handle_rec(rec: extract.Rec) -> None:
         label = " - ".join(x for x in (rec.title, rec.artist) if x)
         if rec.kind == "artist":
-            name = rec.artist or rec.title
-            hits = [t for t in sp.search(f'artist:"{name}"', "track", limit=10)
-                    if any(sim(a["name"], name) >= 0.8 for a in t.get("artists", []))]
-            if not hits:
-                out.unresolved.append(f"artist: {name}")
-            for t in hits[:album_tracks]:
-                out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}"))
+            if not add_artist(rec.artist or rec.title):
+                out.unresolved.append(f"artist: {rec.artist or rec.title}")
             return
         hit = _search(sp, rec.kind, rec.title, rec.artist)
         if not hit:
-            out.unresolved.append(f"{rec.kind}: {label}")
+            # a bare name with no artist is often a band the model took for a song title
+            if not (rec.kind == "track" and not rec.artist and add_artist(rec.title)):
+                out.unresolved.append(f"{rec.kind}: {label}")
         elif rec.kind == "album":
             add_album(hit["id"])
         else:
