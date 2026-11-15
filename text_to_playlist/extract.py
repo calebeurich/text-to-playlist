@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from .imessage import Message
 from .links import strip_links
 
-MODEL = os.environ.get("TTP_MODEL", "claude-opus-5-5")
+MODEL = os.environ.get("TTP_MODEL", "claude-haiku-5-5")
 BETAS = ["server-side-fallback-2026-07-01"]
 CHUNK = 400  # messages per request
 CONTEXT = 15  # earlier messages repeated so references like "that album" resolve

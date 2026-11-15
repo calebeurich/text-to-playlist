@@ -37,7 +37,7 @@ adds any new recs to their playlists, with no questions. The result dialog has a
 Settings live in `~/.config/text-to-playlist/config.json`: `album_mode` (`singles`, `first` or `full`),
 `album_tracks` (default 2), `since_days` (how far back the first sync of a chat looks, default 90),
 `include_dms` (offer one-to-one chats when choosing), `model` (Claude model, default
-`claude-opus-5-5`; `claude-haiku-5-5` is the cheapest).
+`claude-haiku-5-5`, the cheapest; `claude-opus-5-5` is stronger on vague recs).
 
 Album modes: `singles` asks Claude to pick the album's best-known tracks from its real track list,
 `first` takes the opening tracks, `full` adds the whole album.
