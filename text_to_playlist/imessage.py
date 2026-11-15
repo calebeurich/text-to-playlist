@@ -14,6 +14,46 @@ GROUP_STYLE = 43
 DEFAULT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 
 
+ADDRESS_BOOK = Path.home() / "Library" / "Application Support" / "AddressBook"
+
+
+def _handle_key(handle: str) -> str:
+    """Phone numbers match on their last 10 digits, emails on lowercase."""
+    if "@" in handle:
+        return handle.strip().lower()
+    digits = "".join(ch for ch in handle if ch.isdigit())
+    return digits[-10:] if digits else handle
+
+
+def load_contacts(root: Path = ADDRESS_BOOK) -> dict[str, str]:
+    """Map phone numbers / emails to contact names from the local Contacts database.
+    Returns {} if it cannot be read; names are only used to label chats in the picker."""
+    names: dict[str, str] = {}
+    for db in [root / "AddressBook-v22.abcddb", *sorted(root.glob("Sources/*/AddressBook-v22.abcddb"))]:
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            people = {
+                pk: " ".join(x for x in (first, last) if x) or org
+                for pk, first, last, org in conn.execute(
+                    "SELECT Z_PK, ZFIRSTNAME, ZLASTNAME, ZORGANIZATION FROM ZABCDRECORD")
+            }
+            for table, col in (("ZABCDPHONENUMBER", "ZFULLNUMBER"), ("ZABCDEMAILADDRESS", "ZADDRESS")):
+                for owner, value in conn.execute(f"SELECT ZOWNER, {col} FROM {table}"):
+                    if value and people.get(owner):
+                        names.setdefault(_handle_key(value), people[owner])
+            conn.close()
+        except sqlite3.Error:
+            continue
+    return names
+
+
+def _people_label(handles: list[str], contacts: dict[str, str]) -> str:
+    known = [contacts[_handle_key(h)].split()[0] for h in handles if _handle_key(h) in contacts]
+    unknown = [h for h in handles if _handle_key(h) not in contacts]
+    parts = known + unknown
+    return ", ".join(parts[:5]) + (f" +{len(parts) - 5} more" if len(parts) > 5 else "")
+
+
 class MessagesAccessError(RuntimeError):
     pass
 
@@ -82,7 +122,8 @@ def decode_attributed_body(blob: bytes | None) -> str | None:
     return rest[start:start + n].decode("utf-8", "replace")
 
 
-def list_chats(conn: sqlite3.Connection, include_dms: bool = False) -> list[Chat]:
+def list_chats(conn: sqlite3.Connection, include_dms: bool = False,
+               contacts: dict[str, str] | None = None) -> list[Chat]:
     """Chats ordered by most recent activity. Same-named groups are merged
     (iMessage creates a new chat row when a group's membership changes)."""
     rows = conn.execute(
@@ -106,7 +147,7 @@ def list_chats(conn: sqlite3.Connection, include_dms: bool = False) -> list[Chat
         if not is_group and not include_dms:
             continue
         people = handles.get(r["rowid"], [])
-        name = r["display_name"] or ", ".join(people) or r["guid"]
+        name = r["display_name"] or _people_label(people, contacts or {}) or r["guid"]
         key = f"name:{r['display_name']}" if (is_group and r["display_name"]) else f"guid:{r['guid']}"
         ts = _to_unix(r["last_date"])
         if key in chats:

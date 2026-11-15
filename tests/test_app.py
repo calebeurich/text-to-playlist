@@ -180,3 +180,25 @@ def test_app_flow(db, tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "verify_lockdown", lambda: ["leak"])
     monkeypatch.setattr(sandbox, "read", lambda a: (_ for _ in ()).throw(AssertionError("must not read")))
     assert app.main() == 3
+
+
+def test_contact_names_label_unnamed_chats(db, tmp_path):
+    import sqlite3
+    ab = tmp_path / "AddressBook" / "Sources" / "X"
+    ab.mkdir(parents=True)
+    c = sqlite3.connect(ab / "AddressBook-v22.abcddb")
+    c.executescript("""
+        CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, ZFIRSTNAME TEXT, ZLASTNAME TEXT, ZORGANIZATION TEXT);
+        CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT);
+        CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT);
+        INSERT INTO ZABCDRECORD VALUES (1, 'Sam', 'Lee', NULL), (2, 'Ana', NULL, NULL);
+        INSERT INTO ZABCDPHONENUMBER VALUES (1, '(415) 555-0001');
+        INSERT INTO ZABCDEMAILADDRESS VALUES (2, 'Ana@Example.com');
+    """)
+    c.commit()
+    contacts = imessage.load_contacts(tmp_path / "AddressBook")
+    db.chat(1, "", handles=("+14155550001", "ana@example.com", "+14155559999"))
+    db.msg(1, "hi", NOW)
+    chats = imessage.list_chats(imessage.connect(db.path), contacts=contacts)
+    assert chats[0].name == "Sam, Ana, +14155559999"
+    assert imessage.load_contacts(tmp_path / "missing") == {}

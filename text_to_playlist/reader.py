@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ttp-reader")
     p.add_argument("command", choices=["list", "fetch"])
     p.add_argument("--db", default=str(imessage.DEFAULT_DB))
+    p.add_argument("--contacts", default=str(imessage.ADDRESS_BOOK))
     p.add_argument("--dms", action="store_true")
     p.add_argument("--all", action="store_true", help="list every chat, not just the allowed ones")
     p.add_argument("--key", default="", help="chat to fetch")
@@ -42,7 +43,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     allowed = set(state.load_allowed())
     if args.command == "list":
-        chats = imessage.list_chats(conn, include_dms=args.dms or not args.all)
+        from pathlib import Path
+        contacts = imessage.load_contacts(Path(args.contacts))
+        chats = imessage.list_chats(conn, include_dms=args.dms or not args.all, contacts=contacts)
         out = [asdict(c) for c in chats if args.all or c.key in allowed]
     else:
         chat = next((c for c in imessage.list_chats(conn, include_dms=True) if c.key == args.key), None)
