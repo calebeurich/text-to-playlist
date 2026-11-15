@@ -80,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             api_key=cfg.get("anthropic_api_key"), notes=state.read_notes(),
             log=lambda s: print(s, file=sys.stderr),
         )
+        result["cost"], result["model"] = extract.cost_estimate(), extract.MODEL
     else:
         result = apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st)
     json.dump(result, sys.stdout)

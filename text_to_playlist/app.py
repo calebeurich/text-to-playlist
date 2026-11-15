@@ -22,6 +22,11 @@ ALBUMS = [("1 best-known track per album", "singles", 1), ("2 best-known tracks 
           ("The whole album", "full", 2)]
 
 
+MODELS = [("Haiku 5.5 (cheapest)", "claude-haiku-5-5"),
+          ("Sonnet 5.5 (smarter, about 20x the cost)", "claude-sonnet-5-5"),
+          ("Opus 5.5 (smartest, about 40x the cost)", "claude-opus-5-5")]
+
+
 def first_run(cfg: dict) -> bool:
     ui.alert("One-time setup.\n\nNext you'll paste the Client ID of your Spotify developer app "
              f"(its redirect URI must be {REDIRECT_URI}), then your Claude API key.")
@@ -81,9 +86,10 @@ def menu(cfg: dict, n_chats: int) -> str | None:
         f"Albums: {album_label(cfg)}",
         "Re-read a chat from the start...",
         "Nicknames and notes for the AI...",
+        "AI model: " + next((l for l, m in MODELS if m == cfg.get("model", MODELS[0][1])), cfg.get("model", "")),
     ]
     picked = ui.choose("What would you like to do?", items, multiple=False, preselect="first")
-    return ["sync", "chats", "review", "albums", "reset", "notes"][picked[0]] if picked else None
+    return ["sync", "chats", "review", "albums", "reset", "notes", "model"][picked[0]] if picked else None
 
 
 def sync_chat(c: dict, cfg: dict) -> str:
@@ -129,6 +135,9 @@ def sync_chat(c: dict, cfg: dict) -> str:
     lines = [f"{name}: added {len(done['added'])} song(s) from {plan['messages']} new message(s)."]
     lines += [f"  ? couldn't find: {x}" for x in plan["unresolved"][:10]]
     lines += [f"  ! {x[:110]}" for x in plan["notes"][:5]]
+    if plan.get("cost") is not None:
+        lines.append(f"  AI cost for this sync: about ${plan['cost']:.2f}" if plan["cost"] >= 0.005
+                     else "  AI cost for this sync: under 1 cent")
     if done.get("playlist_url"):
         lines.append(f"  {done['playlist_url']}")
     return "\n".join(lines)
@@ -195,6 +204,11 @@ def run() -> int:
                 state.save(CONFIG, cfg)
         elif action == "reset":
             reset_chat()
+        elif action == "model":
+            picked = ui.choose("Which Claude model should read the chats?", [l for l, _ in MODELS], multiple=False)
+            if picked:
+                cfg["model"] = MODELS[picked[0]][1]
+                state.save(CONFIG, cfg)
         elif action == "notes":
             ui.open_text_file(str(state.notes_file()))
             ui.alert("The notes file is open in TextEdit. Add one note per line, save, then come back here.")

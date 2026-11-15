@@ -16,11 +16,31 @@ CHUNK = 400  # messages per request
 CONTEXT = 15  # earlier messages repeated so references like "that album" resolve
 
 
+# $ per million tokens (input, output); used only to show an estimate after each sync.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0)}
+USAGE = {"input": 0, "output": 0}
+
+
+def cost_estimate() -> float | None:
+    price = PRICES.get(MODEL)
+    return None if price is None else (USAGE["input"] * price[0] + USAGE["output"] * price[1]) / 1e6
+
+
 class Rec(BaseModel):
     kind: Literal["track", "album", "artist"]
     title: str  # track or album title; empty string for an artist rec
     artist: str  # empty string if genuinely unknown
     message_id: int
+    album: str = ""  # for a track: the album it is on, if the chat says so
+
+
+class Pick(BaseModel):
+    wanted_id: int
+    candidate: int  # 0 = none of them
+
+
+class Picks(BaseModel):
+    picks: list[Pick]
 
 
 class Extraction(BaseModel):
@@ -46,6 +66,9 @@ recommending, sharing, or saying they are into, so it can be added to a shared l
 - Expand nicknames and in-jokes to the real name when you recognise them ("O Rod" is Olivia Rodrigo). \
 Names that are clearly the chat members' friends or other non-musicians are not recs.
 - kind is "album" when the title is an album or EP (use what you know about the release, not just how they phrased it), "artist" when they only name an artist, else "track".
+- When someone names a specific song and the album it is on ("Bastards off Bunny"), return a track rec for \
+the song with album set to the album title. Add a separate album rec only if they recommend the album as a whole.
+- album is the album a track is on when the chat says so, else an empty string. Leave it empty for album and artist recs.
 - Skip music that is only mentioned in passing, criticised, or is not actually being recommended.
 - Skip anything you cannot pin to a specific title or artist. "[music link]" marks a link that is handled \
 elsewhere: do not create a rec for it.
@@ -55,6 +78,12 @@ elsewhere: do not create a rec for it.
 PICK_SYSTEM = """For each album, choose its best-known tracks: the lead singles and the songs most \
 listeners would know it by. Answer with track numbers taken from the listing given. Order them from most \
 to least well known. If you do not know the album, return an empty list for it rather than guessing."""
+
+
+CANDIDATE_SYSTEM = """Each WANTED line is a music recommendation taken from a group chat that an exact \
+search could not find on Spotify. The chat text may contain typos, nicknames, a shortened title, or the wrong \
+artist. Under it are numbered Spotify search results. For each WANTED item choose the result that is what the \
+person meant, or 0 if none of them is. Prefer 0 over a doubtful match: a wrong song is worse than a missing one."""
 
 
 def _client(api_key: str | None) -> anthropic.Anthropic:
@@ -72,6 +101,8 @@ def _parse(client, system: str, user: str, schema):
         messages=[{"role": "user", "content": user}],
         output_format=schema,
     )
+    USAGE["input"] += resp.usage.input_tokens
+    USAGE["output"] += resp.usage.output_tokens
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude declined to process this batch of messages.")
     if resp.stop_reason == "max_tokens" or resp.parsed_output is None:
@@ -128,3 +159,16 @@ def pick_standouts(albums: list[dict], n: int, api_key: str | None = None) -> di
             nums = [t for t in dict.fromkeys(p.track_numbers) if 1 <= t <= sizes[p.album_id]]
             out[p.album_id] = nums[:n]
     return out
+
+
+def pick_candidates(wanted: list[dict], api_key: str | None = None) -> dict[int, int]:
+    """wanted: [{"id", "text", "candidates": [str]}] -> {id: 1-based candidate number} (misses with no pick are absent)."""
+    if not wanted:
+        return {}
+    blocks = []
+    for w in wanted:
+        listing = "\n".join(f"  {i}. {c}" for i, c in enumerate(w["candidates"], 1))
+        blocks.append(f"WANTED (id {w['id']}): {w['text']}\n{listing}")
+    result = _parse(_client(api_key), CANDIDATE_SYSTEM, "\n\n".join(blocks), Picks)
+    sizes = {w["id"]: len(w["candidates"]) for w in wanted}
+    return {p.wanted_id: p.candidate for p in result.picks if 1 <= p.candidate <= sizes.get(p.wanted_id, 0)}

@@ -282,3 +282,27 @@ def test_items_follow_chat_order_and_wrong_artist_is_recovered(tmp_path, monkeyp
     assert state.read_notes() == ""
     state.notes_file().write_text(state.NOTES_TEMPLATE + "O Rod = Olivia Rodrigo\n")
     assert state.read_notes() == "O Rod = Olivia Rodrigo"
+
+
+def test_second_look_lets_the_model_pick_from_spotify_results(monkeypatch):
+    sp = FakeSpotify()
+    asked = {}
+
+    def fake_pick(wanted, key):
+        asked["wanted"] = wanted
+        cands = wanted[0]["candidates"]
+        return {wanted[0]["id"]: next(i for i, c in enumerate(cands, 1) if c.startswith("Heroes"))}
+
+    monkeypatch.setattr(extract, "pick_candidates", fake_pick)
+    recs = [extract.Rec(kind="artist", title="", artist="O Rod", message_id=3),
+            extract.Rec(kind="track", title="Zzz", artist="Qqq", message_id=4)]
+    r = resolve.resolve(sp, [], recs, use_llm=True)
+    assert [i.uri for i in r.items] == ["spotify:track:remaster"] and "best guess for: artist: O Rod" in r.items[0].label
+    assert r.unresolved == ["track: Zzz - Qqq"] and len(asked["wanted"]) == 2
+    assert resolve.resolve(sp, [], recs, use_llm=False).unresolved == ["artist: O Rod", "track: Zzz - Qqq"]
+
+
+def test_cost_estimate(monkeypatch):
+    monkeypatch.setattr(extract, "MODEL", "claude-sonnet-5-5")
+    monkeypatch.setattr(extract, "USAGE", {"input": 40_000, "output": 20_000})
+    assert round(extract.cost_estimate(), 2) == 0.28

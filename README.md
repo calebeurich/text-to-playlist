@@ -42,6 +42,10 @@ The first launch asks which chats the app may read. After that, opening the app 
   or forget it and build a new playlist.
 - **Nicknames and notes for the AI**: a text file of hints such as "Biggie = The Notorious B.I.G." or
   "Alex Smith is a friend, not a musician".
+- **AI model**: Haiku (default, cheapest), Sonnet or Opus. Each sync's summary shows what the AI calls cost.
+
+Recs that an exact search can't find get a second look: the model is shown Spotify's actual results and
+picks one or declines. Those appear in the review list marked "best guess for".
 
 Songs are added in chat order, oldest first, so the newest recs are at the bottom of the playlist.
 

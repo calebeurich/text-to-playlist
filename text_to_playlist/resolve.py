@@ -78,9 +78,11 @@ def apple_to_rec(link: Link, get_json=_get_json) -> extract.Rec | None:
                        message_id=link.message_id)
 
 
-def _search(sp, kind: str, title: str, artist: str) -> dict | None:
+def _search(sp, kind: str, title: str, artist: str, album: str = "") -> dict | None:
     field_name = "album" if kind == "album" else "track"
     queries = []
+    if kind == "track" and title and album:
+        queries.append(f'track:"{title}" album:"{album}"' + (f' artist:"{artist}"' if artist else ""))
     if title and artist:
         queries.append(f'{field_name}:"{title}" artist:"{artist}"')
     queries.append(f"{title} {artist}".strip())
@@ -99,6 +101,10 @@ def resolve(
     albums: dict[str, dict] = {}
     album_msg: dict[str, int] = {}
     recs = list(recs)
+    misses: list[extract.Rec] = []
+
+    def describe(rec: extract.Rec) -> str:
+        return f"{rec.kind}: " + " - ".join(x for x in (rec.title, rec.artist) if x)
 
     def add_album(album_id: str, message_id: int) -> None:
         if album_id not in albums:
@@ -149,22 +155,21 @@ def resolve(
         return False
 
     def handle_rec(rec: extract.Rec) -> None:
-        label = " - ".join(x for x in (rec.title, rec.artist) if x)
         if rec.kind == "artist":
             if not add_artist(rec.artist or rec.title, rec.message_id):
-                out.unresolved.append(f"artist: {rec.artist or rec.title}")
+                misses.append(rec)
             return
         # People (and the model) often don't say whether a title is a song or an album,
         # so if it isn't found as one, try the other before giving up.
         kind = rec.kind
-        hit = _search(sp, kind, rec.title, rec.artist)
+        hit = _search(sp, kind, rec.title, rec.artist, rec.album)
         if not hit:
             kind = "album" if rec.kind == "track" else "track"
             hit = _search(sp, kind, rec.title, rec.artist)
         if not hit:
             # a bare name with no artist is often a band the model took for a song title
             if not (not rec.artist and add_artist(rec.title, rec.message_id)) and not title_only(rec):
-                out.unresolved.append(f"{rec.kind}: {label}")
+                misses.append(rec)
         elif kind == "album":
             add_album(hit["id"], rec.message_id)
         else:
@@ -174,6 +179,39 @@ def resolve(
         guarded(link.url, lambda: handle_link(link))
     for rec in recs:
         guarded(f"{rec.kind}: {rec.title} {rec.artist}", lambda: handle_rec(rec))
+
+    # ---- second look: show the model what Spotify actually has for each miss -------
+    if misses and use_llm:
+        try:
+            wanted, pools = [], {}
+            for n, rec in enumerate(misses):
+                q = f"{rec.title} {rec.artist}".strip()
+                pool = [("track", t) for t in sp.search(q, "track")] + [("album", a) for a in sp.search(q, "album", limit=3)]
+                if rec.title and rec.artist:
+                    pool += [("track", t) for t in sp.search(rec.title, "track", limit=3)]
+                seen_ids, uniq = set(), []
+                for kind, c in pool:
+                    cid = c.get("uri") or c.get("id")
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        uniq.append((kind, c))
+                if uniq:
+                    pools[n] = uniq
+                    wanted.append({"id": n, "text": describe(rec),
+                                   "candidates": [f"{c['name']} - {_artists(c)} ({kind})" for kind, c in uniq]})
+            picks = extract.pick_candidates(wanted, api_key)
+            for n, choice in picks.items():
+                kind, c = pools[n][choice - 1]
+                rec = misses[n]
+                if kind == "album":
+                    add_album(c["id"], rec.message_id)
+                else:
+                    out.items.append(Item(c["uri"], f"{c['name']} - {_artists(c)} (best guess for: {describe(rec)})",
+                                          rec.message_id))
+            misses = [rec for n, rec in enumerate(misses) if n not in picks]
+        except Exception as e:
+            out.notes.append(f"Second look at the misses failed ({type(e).__name__}: {e}).")
+    out.unresolved += [describe(rec) for rec in misses]
 
     # ---- albums -> tracks ---------------------------------------------------
     picks: dict[str, list[int]] = {}
