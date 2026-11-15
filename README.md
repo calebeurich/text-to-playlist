@@ -14,53 +14,63 @@ It understands Spotify links, Apple Music links, and plain-text recs ("you have 
    ```
 
    ```bash
-   python3 -m venv .venv && .venv/bin/pip install -e .
+   ./install.sh
    ```
 
-2. **Let your terminal read Messages**: System Settings > Privacy & Security > Full Disk Access, switch on
-   your terminal app, then restart it.
+   This puts the tool in `~/.local/share/text-to-playlist` and builds `Text to Playlist.app` in
+   `~/Applications`. To update later, run `git pull` and then `./install.sh` again.
 
-3. **Spotify app** (needs Premium): at <https://developer.spotify.com/dashboard> create an app, add the
+2. **Spotify app** (needs Premium): at <https://developer.spotify.com/dashboard> create an app, add the
    redirect URI `http://127.0.0.1:8888/callback`, and tick "Web API". Copy the Client ID.
 
-4. **Claude API key**: in the Anthropic Console create a separate workspace for this tool, give it a low
+3. **Claude API key**: in the Anthropic Console create a separate workspace for this tool, give it a low
    monthly spend limit, and create a key in it.
 
-5. **Run it**. The first run asks for the Client ID and the key, then opens Spotify's login page once.
-
-   ```bash
-   .venv/bin/ttp
-   ```
+4. **Open "Text to Playlist"**. The first launch asks for the Client ID and the key, then asks you to switch
+   on Full Disk Access for the app (not for your terminal), then opens Spotify's login page once.
 
 ## Use
 
-| Command | What it does |
-|---|---|
-| `ttp` | Shows your recent group chats; type a number and it syncs that chat. |
-| `ttp --all` | Syncs every chat that already has a playlist, no questions. |
-| `ttp --chat "Music Heads"` | Syncs one chat by name. |
-| `ttp --dry-run` | Shows what would be added without touching Spotify. |
+Open the app, pick a chat from the list, done. Chats that already have a playlist are starred, and
+"Update all my playlists" refreshes every one of them in one click.
 
-Options: `--album-mode singles|first|full` (default `singles`), `--album-tracks N` (default 2),
-`--since-days N` (how far back the first sync of a chat looks, default 90), `--dms` (include one-to-one
-chats), `--links-only` (never send text to Claude).
+Settings live in `~/.config/text-to-playlist/config.json`: `album_mode` (`singles`, `first` or `full`),
+`album_tracks` (default 2), `since_days` (how far back the first sync of a chat looks, default 90),
+`include_dms`.
 
 Album modes: `singles` asks Claude to pick the album's best-known tracks from its real track list,
 `first` takes the opening tracks, `full` adds the whole album.
 
-## What it can and can't touch
+## How it is locked down
 
-- **Messages**: the database is opened read-only, and only the chats you pick are read.
-- **Claude**: receives the text of new messages in the chosen chat. Phone numbers and emails are replaced
-  with "Person A", "Person B" first. With `--links-only` nothing is sent.
+The app is split into two halves that run in separate macOS sandboxes:
+
+| Half | Can | Cannot |
+|---|---|---|
+| Reader | Read the iMessage database, read-only | Use the network at all |
+| Syncer | Talk to Claude and Spotify | Read anything in your home folder except its own code and config |
+
+The reader hands the syncer only the new messages of the chat you picked, with phone numbers and emails
+already replaced by "Person A", "Person B". On every launch the app tests both walls (it tries to reach
+the internet from the reader and to open the message database from the syncer) and refuses to run if
+either attempt succeeds.
+
+- **Full Disk Access** is granted to this one app, not to your terminal. macOS has no narrower
+  "Messages only" permission.
 - **Spotify**: the login asks for one permission, `playlist-modify-private`. The tool can create and edit
   private playlists; it cannot see your listening history, library, or profile, or control playback. It only
   ever adds tracks, and only to playlists it created.
 - **On disk**: `~/.config/text-to-playlist/` holds the Spotify token, the API key, and which tracks were
   already added per chat. Files are readable only by you. Songs you delete from a playlist are not re-added.
 
+## Terminal version
+
+`ttp` does the same thing from a terminal in a single unsandboxed process, and needs Full Disk Access
+on the terminal itself. It is there for debugging: `ttp --dry-run` shows what would be added without
+touching Spotify, and `ttp --help` lists the options.
+
 ## Tests
 
 ```bash
-.venv/bin/pip install pytest && .venv/bin/pytest
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]" && .venv/bin/pytest
 ```

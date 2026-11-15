@@ -91,3 +91,71 @@ def test_cli_end_to_end(db, tmp_path, monkeypatch, capsys):
     db.msg(1, f"again https://open.spotify.com/track/{T} and https://open.spotify.com/album/{A}", NOW - 10)
     assert cli.main(["--db", str(db.path), "--all", "--album-mode", "first", "--album-tracks", "1"]) == 0
     assert sp.added == ["spotify:track:" + T, "spotify:track:blonde1"] and len(sp.playlists) == 1
+
+
+def test_reader_outputs_aliased_json(db, capsys):
+    import json
+
+    from text_to_playlist import reader
+    db.chat(1, "Music Heads")
+    db.msg(1, "hello", NOW - 100, handle_id=1)
+    db.msg(1, "mine", NOW - 90, from_me=1)
+    assert reader.main(["list", "--db", str(db.path)]) == 0
+    chats = json.loads(capsys.readouterr().out)
+    assert chats[0]["name"] == "Music Heads" and chats[0]["rowids"] == [1]
+    assert reader.main(["fetch", "--db", str(db.path), "--rowids", "1"]) == 0
+    out = capsys.readouterr().out
+    assert [m["sender"] for m in json.loads(out)] == ["Person A", "me"] and "+1555" not in out
+    assert reader.main(["list", "--db", str(db.path) + ".missing"]) == 2
+
+
+def test_syncer_profile_walls_off_home():
+    from pathlib import Path
+
+    from text_to_playlist import sandbox
+    prof = sandbox.syncer_profile()
+    assert f'(deny file-read-data file-write* (subpath "{Path.home().resolve()}"))' in prof
+    assert "deny network" in sandbox.READER_PROFILE and "network" not in prof
+
+
+def test_app_flow(db, tmp_path, monkeypatch):
+    import json
+
+    from text_to_playlist import app, reader, sandbox, syncer, ui
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    state.save("config.json", {"spotify_client_id": "cid"})
+    db.chat(1, "Music Heads")
+    db.chat(2, "Other")
+    db.msg(1, f"https://open.spotify.com/track/{T}", NOW - 100)
+    db.msg(2, "nothing here", NOW - 50)
+    sp, shown = FakeSpotify(), []
+
+    def fake_read(args):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert reader.main([args[0], "--db", str(db.path), *args[1:]]) == 0
+        return json.loads(buf.getvalue())
+
+    def fake_sync(payload):
+        msgs = [imessage.Message(**m) for m in payload["messages"]]
+        return syncer.sync_messages(payload["chat_key"], payload["chat_name"], msgs, sp, state.load("state.json"))
+
+    monkeypatch.setattr(sandbox, "read", fake_read)
+    monkeypatch.setattr(sandbox, "sync", fake_sync)
+    monkeypatch.setattr(sandbox, "verify_lockdown", lambda: [])
+    monkeypatch.setattr(ui, "notify", lambda m: None)
+    monkeypatch.setattr(ui, "alert", lambda m, buttons=("OK",): shown.append(m))
+    monkeypatch.setattr(ui, "choose", lambda prompt, items: [items.index("Music Heads")])
+    assert app.main() == 0
+    assert sp.added == ["spotify:track:" + T] and "added 1 track(s)" in shown[-1]
+
+    # now linked: the list offers "update all" first, and a rerun adds nothing
+    monkeypatch.setattr(ui, "choose", lambda prompt, items: [0] if items[0] == app.SYNC_ALL else [])
+    assert app.main() == 0 and len(sp.added) == 1
+
+    # failing safety check stops before anything is read
+    monkeypatch.setattr(sandbox, "verify_lockdown", lambda: ["leak"])
+    monkeypatch.setattr(sandbox, "read", lambda a: (_ for _ in ()).throw(AssertionError("must not read")))
+    assert app.main() == 3

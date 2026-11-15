@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import secrets
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -89,7 +90,7 @@ class Spotify:
                 pass
 
         server = HTTPServer(("127.0.0.1", REDIRECT_PORT), Handler)
-        print(f"Opening Spotify login in your browser. If nothing opens, visit:\n{url}\n")
+        print(f"Opening Spotify login in your browser. If nothing opens, visit:\n{url}\n", file=sys.stderr)
         webbrowser.open(url)
         while "code" not in result and "error" not in result:
             server.handle_request()

@@ -8,9 +8,9 @@ import sys
 import time
 from datetime import datetime
 
-from . import extract, imessage, state
-from .links import find_links
-from .resolve import ALBUM_MODES, resolve
+from . import imessage, state
+from .resolve import ALBUM_MODES
+from .syncer import sync_messages
 from .spotify import REDIRECT_URI, Spotify
 
 CONFIG, STATE = "config.json", "state.json"
@@ -52,41 +52,18 @@ def sync_chat(chat, conn, sp, st, cfg, args, api_key) -> None:
         return
     scope = f"from the last {args.since_days} days" if first_time else "since the last sync"
     print(f"{len(msgs)} new messages {scope}.")
-
-    links = [l for m in msgs for l in find_links(m.text, m.rowid)]
-    recs = []
-    use_llm = bool(api_key or os.environ.get("ANTHROPIC_API_KEY")) and not args.links_only
-    if use_llm:
-        print("Reading messages for recs...")
-        recs = extract.extract_recs(msgs, api_key)
-    print(f"Found {len(links)} music links and {len(recs)} written recs. Matching on Spotify...")
-
-    res = resolve(sp, links, recs, album_mode=args.album_mode, album_tracks=args.album_tracks,
-                  use_llm=use_llm, api_key=api_key)
-    already = set(cs["added_uris"])
-    new = [i for i in res.items if i.uri not in already]
-
-    for i in new:
-        print(f"  + {i.label}")
-    for u in res.unresolved:
+    r = sync_messages(chat.key, chat.name, msgs, sp, st, album_mode=args.album_mode, album_tracks=args.album_tracks,
+                      links_only=args.links_only, dry_run=args.dry_run, api_key=api_key, log=print)
+    for label in r["added"]:
+        print(f"  + {label}")
+    for u in r["unresolved"]:
         print(f"  ? no match: {u}")
-    for n in res.notes:
+    for n in r["notes"]:
         print(f"  ! {n}")
     if args.dry_run:
-        print(f"Dry run: {len(new)} track(s) would be added. Nothing was changed.")
-        return
-
-    if new:
-        if not cs.get("playlist_id"):
-            pl = sp.create_playlist(f"{chat.name[:80]} recs", "Song recs from the group chat, added by text-to-playlist")
-            cs["playlist_id"] = pl["id"]
-            cs["playlist_url"] = pl.get("external_urls", {}).get("spotify", "")
-        sp.add_tracks(cs["playlist_id"], [i.uri for i in new])
-        cs["added_uris"] += [i.uri for i in new]
-    cs["name"] = chat.name
-    cs["last_rowid"] = max(m.rowid for m in msgs)
-    state.save(STATE, st)
-    print(f"Added {len(new)} track(s). {cs.get('playlist_url', '')}")
+        print(f"Dry run: {len(r['added'])} track(s) would be added. Nothing was changed.")
+    else:
+        print(f"Added {len(r['added'])} track(s). {r['playlist_url']}")
 
 
 def main(argv: list[str] | None = None) -> int:
