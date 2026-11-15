@@ -39,12 +39,15 @@ def syncer_profile() -> str:
     )
 
 
-def _run(profile: str, args: list[str], stdin: str | None = None, timeout: int = 900) -> str:
+def _run(profile: str, args: list[str], stdin: str | None = None, timeout: int = 3 * 3600) -> str:
     if not os.path.exists(SANDBOX_EXEC):
         raise SandboxError("macOS sandbox-exec not found; refusing to run unsandboxed.")
     state.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    p = subprocess.run([SANDBOX_EXEC, "-p", profile, sys.executable, *args], input=stdin, capture_output=True,
-                       text=True, timeout=timeout)
+    try:
+        p = subprocess.run([SANDBOX_EXEC, "-p", profile, sys.executable, *args], input=stdin, capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SandboxError(f"Gave up after {timeout // 60} minutes. Try a shorter lookback.") from None
     if p.returncode != 0:
         raise SandboxError(p.stderr.strip()[-1500:] or f"exit code {p.returncode}", p.returncode)
     return p.stdout
@@ -67,7 +70,7 @@ def _probe(profile: str, code: str) -> bool:
     try:
         _run(profile, ["-c", code], timeout=30)
         return True
-    except (SandboxError, subprocess.TimeoutExpired):
+    except SandboxError:
         return False
 
 

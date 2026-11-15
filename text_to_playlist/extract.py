@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
 import anthropic
@@ -129,17 +130,19 @@ def extract_recs(messages: list[Message], api_key: str | None = None, notes: str
     if notes.strip():
         system += ("\n\nNotes from the playlist owner about this group (nicknames for artists, people who are "
                    "friends rather than musicians, and so on). Apply them:\n" + notes.strip())
-    recs: list[Rec] = []
-    for start in range(0, len(lines), CHUNK):
+
+    def one_chunk(start: int) -> list[Rec]:
         context = lines[max(0, start - CONTEXT):start]
-        new = lines[start:start + CHUNK]
         user = ""
         if context:
             user += "EARLIER CONTEXT:\n" + "\n".join(context) + "\n\n"
-        user += "NEW MESSAGES:\n" + "\n".join(new)
+        user += "NEW MESSAGES:\n" + "\n".join(lines[start:start + CHUNK])
         valid = {m.rowid for m in messages[start:start + CHUNK]}
-        recs += [r for r in _parse(client, system, user, Extraction).recs if r.message_id in valid]
-    return recs
+        return [r for r in _parse(client, system, user, Extraction).recs if r.message_id in valid]
+
+    # Long histories are many chunks; read a few at a time so a full-history sync takes minutes, not an hour.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return [r for chunk in pool.map(one_chunk, range(0, len(lines), CHUNK)) for r in chunk]
 
 
 def pick_standouts(albums: list[dict], n: int, api_key: str | None = None) -> dict[str, list[int]]:
