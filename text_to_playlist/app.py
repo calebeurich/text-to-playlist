@@ -131,12 +131,19 @@ def sync_chat(c: dict, cfg: dict) -> str:
     busy = ui.progress(f"Adding {len(items)} song(s) to the '{name}' playlist...")
     try:
         done = sandbox.syncer("apply", {"chat_key": key, "chat_name": name, "items": items,
-                                        "last_rowid": plan["last_rowid"], "oldest_ts": plan.get("oldest_ts", 0)})
+                                        "last_rowid": plan["last_rowid"], "oldest_ts": plan.get("oldest_ts", 0),
+                                        "deferred": plan.get("deferred")})
     finally:
         busy.close()
     state.log(f"'{key}': added {len(done['added'])} tracks")
 
     lines = [f"{name}: added {len(done['added'])} song(s) from {plan['messages']} new message(s)."]
+    held = plan.get("deferred") or {}
+    n_held = len(held.get("links", [])) + len(held.get("recs", []))
+    if plan.get("limited"):
+        lines.append(f"  ! Spotify's rate limit was reached. {n_held} rec(s) are saved and will be tried "
+                     "automatically on the next sync.")
+        lines.append(f"  ! {plan['limited']}")
     lines += [f"  ? couldn't find: {x}" for x in plan["unresolved"][:10]]
     lines += [f"  ! {x[:110]}" for x in plan["notes"][:5]]
     if plan.get("cost") is not None:

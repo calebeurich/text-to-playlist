@@ -160,7 +160,7 @@ def test_app_flow(db, tmp_path, monkeypatch):
             msgs = [imessage.Message(**m) for m in payload["messages"]]
             return syncer.plan_messages(payload["chat_key"], msgs, sp, st, album_mode="first", album_tracks=1)
         return syncer.apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st,
-                                  payload.get("oldest_ts", 0))
+                                  payload.get("oldest_ts", 0), payload.get("deferred"))
 
     class Busy:
         def __init__(self, m): pass
@@ -416,3 +416,56 @@ def test_http_headers_are_case_insensitive(monkeypatch):
     monkeypatch.setattr(spotify.urllib.request, "urlopen", boom)
     status, _, headers = spotify._http("GET", "https://api.spotify.com/v1/x")
     assert status == 429 and headers["retry-after"] == "777"
+
+
+def test_rate_limit_keeps_what_was_found_and_retries_the_rest(tmp_path, monkeypatch):
+    from text_to_playlist import syncer
+    from text_to_playlist.spotify import SpotifyRateLimited
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    sp = FakeSpotify()
+    sp.cache = {}
+    real_search, budget = sp.search, [1]
+
+    def limited_search(query, kind, limit=5):
+        if budget[0] <= 0:
+            raise SpotifyRateLimited(3600)
+        budget[0] -= 1
+        return real_search(query, kind, limit)
+
+    sp.search = limited_search
+    recs = [extract.Rec(kind="track", title="Vampire Empire", artist="Big Thief", message_id=1),
+            extract.Rec(kind="track", title="Heroes", artist="David Bowie", message_id=2)]
+    monkeypatch.setattr(extract, "extract_recs", lambda msgs, key, notes, progress: list(recs))
+    msgs = [imessage.Message(1, 10.0, "me", "vampire empire!"),
+            imessage.Message(2, 20.0, "me", "heroes too"),
+            imessage.Message(3, 30.0, "me", f"https://open.spotify.com/album/{A}")]
+    load = lambda: state.load("state.json")
+
+    plan = syncer.plan_messages("k", msgs, sp, load(), api_key="x", album_mode="first", album_tracks=1)
+    # the album link was fetched, the first rec used the only search allowed, the second rec is held back
+    assert [i["uri"] for i in plan["items"]] == ["spotify:track:vamp", "spotify:track:blonde1"]
+    assert "rate-limiting" in plan["limited"] and plan["unresolved"] == []
+    assert [r["title"] for r in plan["deferred"]["recs"]] == ["Heroes"]
+    syncer.apply_items("k", "Chat", plan["items"], plan["last_rowid"], sp, load(), plan["oldest_ts"], plan["deferred"])
+    assert sp.added == ["spotify:track:vamp", "spotify:track:blonde1"]
+
+    # next sync: no new messages, the limit has lifted, the held rec is picked up and then cleared
+    budget[0] = 99
+    plan = syncer.plan_messages("k", [], sp, load(), api_key="x")
+    assert [i["uri"] for i in plan["items"]] == ["spotify:track:remaster"] and plan["limited"] == ""
+    syncer.apply_items("k", "Chat", plan["items"], plan["last_rowid"], sp, load(), 0, plan["deferred"])
+    assert sp.added[-1] == "spotify:track:remaster" and load()["chats"]["k"]["deferred"]["recs"] == []
+    assert syncer.plan_messages("k", [], sp, load(), api_key="x")["items"] == []
+
+
+def test_song_links_are_added_even_when_spotify_lookups_are_blocked():
+    from text_to_playlist.spotify import SpotifyRateLimited
+    sp = FakeSpotify()
+    sp.cache = {}
+    sp.prefetch_tracks = lambda ids: (_ for _ in ()).throw(SpotifyRateLimited(7200))
+    links = find_links(f"https://open.spotify.com/track/{T}", 1) + find_links(f"https://open.spotify.com/album/{A}", 2)
+    r = resolve.resolve(sp, links, [extract.Rec(kind="track", title="Heroes", artist="David Bowie", message_id=3)],
+                        use_llm=False)
+    assert [i.uri for i in r.items] == ["spotify:track:" + T] and "not looked up yet" in r.items[0].label
+    assert [l.kind for l in r.deferred_links] == ["album"] and [x.title for x in r.deferred_recs] == ["Heroes"]
+    assert "2 hour" in r.limited

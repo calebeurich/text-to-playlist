@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import asdict
 
 from . import extract, state
 from .imessage import Message
-from .links import find_links
+from .links import Link, find_links
 from .resolve import resolve
 
 CONFIG, STATE = "config.json", "state.json"
@@ -19,32 +20,38 @@ def plan_messages(chat_key: str, msgs: list[Message], sp, st: dict, *, album_mod
                   progress=lambda step, done=0, total=0: None) -> dict:
     """Work out which tracks the new messages point to. Changes nothing."""
     cs = state.chat_state(st, chat_key)
+    held = cs.get("deferred") or {"links": [], "recs": [], "ts": {}}  # left over from a rate-limited sync
     plan = {"messages": len(msgs), "items": [], "unresolved": [], "notes": [],
-            "oldest_ts": min((m.ts for m in msgs), default=0),
+            "oldest_ts": min((m.ts for m in msgs), default=0), "limited": "", "deferred": held,
             "last_rowid": max((m.rowid for m in msgs), default=cs["last_rowid"])}
-    if not msgs:
+    if not msgs and not held["links"] and not held["recs"]:
         return plan
-    links = [l for m in msgs for l in find_links(m.text, m.rowid)]
-    recs = []
+    links = [Link(**d) for d in held["links"]] + [l for m in msgs for l in find_links(m.text, m.rowid)]
+    recs = [extract.Rec(**d) for d in held["recs"]]
     use_llm = bool(api_key or os.environ.get("ANTHROPIC_API_KEY")) and not links_only
-    if use_llm:
+    if use_llm and msgs:
         log("Reading messages for recs...")
-        recs = extract.extract_recs(msgs, api_key, notes, progress)
+        recs += extract.extract_recs(msgs, api_key, notes, progress)
     log(f"Found {len(links)} music links and {len(recs)} written recs. Matching on Spotify...")
     res = resolve(sp, links, recs, album_mode=album_mode, album_tracks=album_tracks, use_llm=use_llm, api_key=api_key,
                   progress=progress)
     # Row ids follow the order messages reached this Mac, which is not always the order they were sent.
-    sent = {m.rowid: m.ts for m in msgs}
+    sent = {int(k): v for k, v in held["ts"].items()}
+    sent.update({m.rowid: m.ts for m in msgs})
     res.items.sort(key=lambda i: sent.get(i.message_id, 0))
     already = set(cs["added_uris"])
+    waiting = [l.message_id for l in res.deferred_links] + [r.message_id for r in res.deferred_recs]
     plan.update(items=[{"uri": i.uri, "label": i.label, "ts": sent.get(i.message_id, 0)}
                        for i in res.items if i.uri not in already],
-                unresolved=res.unresolved, notes=res.notes)
+                unresolved=res.unresolved, notes=res.notes, limited=res.limited,
+                deferred={"links": [asdict(l) for l in res.deferred_links],
+                          "recs": [r.model_dump() for r in res.deferred_recs],
+                          "ts": {str(i): sent.get(i, 0) for i in waiting}})
     return plan
 
 
 def apply_items(chat_key: str, chat_name: str, items: list[dict], last_rowid: int, sp, st: dict,
-                oldest_ts: float = 0) -> dict:
+                oldest_ts: float = 0, deferred: dict | None = None) -> dict:
     """Add the chosen tracks to the chat's playlist and remember how far we have read.
 
     New recs go at the bottom. When an older stretch of the chat is read later (a longer
@@ -71,6 +78,8 @@ def apply_items(chat_key: str, chat_name: str, items: list[dict], last_rowid: in
             cs["added_uris"] += [i["uri"] for i in newer]
     cs["name"] = chat_name
     cs["last_rowid"] = max(cs["last_rowid"], last_rowid)
+    if deferred is not None:
+        cs["deferred"] = deferred
     if oldest_ts:
         cs["oldest_ts"] = min(covered_from, oldest_ts) if covered_from else oldest_ts
     state.save(STATE, st)
@@ -83,7 +92,8 @@ def sync_messages(chat_key: str, chat_name: str, msgs: list[Message], sp, st: di
               "unresolved": plan["unresolved"], "notes": plan["notes"], "dry_run": dry_run,
               "playlist_url": state.chat_state(st, chat_key).get("playlist_url", "")}
     if msgs and not dry_run:
-        result.update(apply_items(chat_key, chat_name, plan["items"], plan["last_rowid"], sp, st, plan["oldest_ts"]))
+        result.update(apply_items(chat_key, chat_name, plan["items"], plan["last_rowid"], sp, st, plan["oldest_ts"],
+                                  plan["deferred"]))
     return result
 
 
@@ -111,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             result["cost"], result["model"] = extract.cost_estimate(), extract.MODEL
         else:
             result = apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st,
-                                 payload.get("oldest_ts", 0))
+                                 payload.get("oldest_ts", 0), payload.get("deferred"))
     except SpotifyRateLimited as e:
         print(e, file=sys.stderr)
         return 4

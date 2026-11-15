@@ -26,6 +26,11 @@ class Resolution:
     items: list[Item] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # When Spotify's rate limit is hit part-way, what could not be looked up is handed back
+    # here so it can be saved and tried on the next sync, instead of failing the whole run.
+    limited: str = ""
+    deferred_links: list[Link] = field(default_factory=list)
+    deferred_recs: list = field(default_factory=list)
 
 
 def norm(s: str) -> str:
@@ -181,21 +186,49 @@ def resolve(
 
     step = "Step 2 of 2: finding the songs on Spotify"
     progress(step, 0, len(links) + len(recs))
-    if hasattr(sp, "prefetch_tracks"):
-        sp.prefetch_tracks([l.id for l in links if l.service == "spotify" and l.kind == "track"])
-    for n, link in enumerate(links):
-        if n % 5 == 0:
-            progress(step, n, len(links) + len(recs))
-        guarded(link.url, lambda: handle_link(link))
-    n_links = len(links)
-    for n, rec in enumerate(recs):  # recs can grow above: Apple Music links are turned into recs
-        if n % 5 == 0:
-            progress(step, n_links + n, n_links + len(recs))
-        guarded(f"{rec.kind}: {rec.title} {rec.artist}", lambda: handle_rec(rec))
+    try:
+        if hasattr(sp, "prefetch_tracks"):
+            sp.prefetch_tracks([l.id for l in links if l.service == "spotify" and l.kind == "track"])
+    except SpotifyRateLimited as e:
+        out.limited = str(e)
+
+    todo_links = list(links)
+    while todo_links and not out.limited:
+        if (len(links) - len(todo_links)) % 5 == 0:
+            progress(step, len(links) - len(todo_links), len(links) + len(recs))
+        link = todo_links[0]
+        try:
+            guarded(link.url, lambda: handle_link(link))
+        except SpotifyRateLimited as e:
+            out.limited = str(e)
+            break
+        todo_links.pop(0)
+    done_recs = 0
+    while done_recs < len(recs) and not out.limited:  # recs can grow above: Apple Music links become recs
+        if done_recs % 5 == 0:
+            progress(step, len(links) + done_recs, len(links) + len(recs))
+        rec = recs[done_recs]
+        try:
+            guarded(f"{rec.kind}: {rec.title} {rec.artist}", lambda: handle_rec(rec))
+        except SpotifyRateLimited as e:
+            out.limited = str(e)
+            break
+        done_recs += 1
+    if out.limited:
+        # A song link already says exactly which track it is, so it can be added without asking Spotify.
+        known = getattr(sp, "cache", {})
+        for link in todo_links:
+            if link.service == "spotify" and link.kind == "track":
+                t = known.get(f"track|{link.id}")
+                label = f"{t['name']} - {_artists(t)}" if t else f"Song link (title not looked up yet): {link.url[:60]}"
+                out.items.append(Item(f"spotify:track:{link.id}", label, link.message_id))
+            else:
+                out.deferred_links.append(link)
+        out.deferred_recs = recs[done_recs:]
     progress("Almost done: double-checking misses and picking album tracks")
 
     # ---- second look: show the model what Spotify actually has for each miss -------
-    if misses and use_llm:
+    if misses and use_llm and not out.limited:
         try:
             wanted, pools = [], {}
             for n, rec in enumerate(misses):
@@ -223,11 +256,14 @@ def resolve(
                     out.items.append(Item(c["uri"], f"{c['name']} - {_artists(c)} (best guess for: {describe(rec)})",
                                           rec.message_id))
             misses = [rec for n, rec in enumerate(misses) if n not in picks]
-        except SpotifyRateLimited:
-            raise
+        except SpotifyRateLimited as e:
+            out.limited = str(e)
         except Exception as e:
             out.notes.append(f"Second look at the misses failed ({type(e).__name__}: {e}).")
-    out.unresolved += [describe(rec) for rec in misses]
+    if out.limited:
+        out.deferred_recs = misses + out.deferred_recs  # not given a fair try yet
+    else:
+        out.unresolved += [describe(rec) for rec in misses]
 
     # ---- albums -> tracks ---------------------------------------------------
     picks: dict[str, list[int]] = {}
