@@ -4,6 +4,7 @@ from __future__ import annotations
 import pathlib
 import re
 import subprocess
+import time
 
 from . import state
 
@@ -59,19 +60,27 @@ def choose(prompt: str, items: list[str], multiple: bool = True, preselect: str 
 PROGRESS_WINDOW_JS = r"""
 ObjC.import('Cocoa');
 function run(argv) {
-  var title = argv[0], statusPath = argv[1], stopped = false;
+  var title = argv[0], statusPath = argv[1], stopped = false, trail = '';
+  function mark(stage) {  // leaves a trail in a side file so a silent failure can be located
+    trail += stage + ' ';
+    $.NSString.stringWithString(trail).writeToFileAtomicallyEncodingError(statusPath + '.window', true, 4, null);
+  }
+  mark('start');
   ObjC.registerSubclass({
     name: 'TTPStopTarget',
     methods: {'stop:': {types: ['void', ['id']], implementation: function (sender) { stopped = true; }}}
   });
   var target = $.TTPStopTarget.alloc.init;
+  mark('subclass');
   var app = $.NSApplication.sharedApplication;
   app.setActivationPolicy(1);  // accessory: a window, but no Dock icon
   app.finishLaunching;
+  mark('app');
 
   var win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(0, 0, 460, 170), 1, 2, false);
   win.setTitle('Text to Playlist');
   win.center;
+  mark('window');
   var heading = $.NSTextField.wrappingLabelWithString(title);
   heading.setFrame($.NSMakeRect(20, 110, 420, 44));
   var status = $.NSTextField.labelWithString('Starting...');
@@ -85,13 +94,13 @@ function run(argv) {
   button.setFrame($.NSMakeRect(350, 12, 90, 32));
   var view = win.contentView;
   view.addSubview(heading); view.addSubview(status); view.addSubview(bar); view.addSubview(button);
+  mark('controls');
   win.setLevel(3);  // floating: stays visible above other windows without taking keyboard focus
   win.setHidesOnDeactivate(false);
   win.makeKeyAndOrderFront(null);
   win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
-  $.NSString.stringWithString('visible=' + win.isVisible + ' screens=' + $.NSScreen.screens.count)
-    .writeToFileAtomicallyEncodingError(statusPath + '.window', true, 4, null);
+  mark('shown visible=' + win.isVisible);
 
   var mode = $('kCFRunLoopDefaultMode'), last = '';
   while (!stopped) {
@@ -122,11 +131,20 @@ function run(argv) {
 }
 """
 
-# Used only if the window above fails to start: one plain dialog that never refreshes.
+# Used if the window above does not come up: a plain dialog that shows the current numbers
+# and only redraws when you press "Refresh progress", so it never jumps in front by itself.
 PLAIN_DIALOG = (
     'on run argv\n'
     'tell me to activate\n'
-    'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Stop"} giving up after 14400\n'
+    'repeat\n'
+    'set t to item 1 of argv\n'
+    'try\n'
+    'set t to t & return & return & (do shell script "cat " & quoted form of (item 2 of argv))\n'
+    'end try\n'
+    'set r to display dialog t with title "Text to Playlist" buttons {"Stop", "Refresh progress"} '
+    'default button 2 giving up after 14400\n'
+    'if (gave up of r) is false and (button returned of r) is "Stop" then return "stop"\n'
+    'end repeat\n'
     'end run'
 )
 
@@ -138,41 +156,53 @@ class progress:
         self.closed = False
         self.fallback = False
         self.reported = False
+        self.started = time.time()
         self.message = message
         status = state.CONFIG_DIR / "progress.txt"
         self.status = str(status)
-        try:
-            status.unlink()
-        except OSError:
-            pass
+        for stale in (status, pathlib.Path(self.status + ".window")):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
         self.proc = subprocess.Popen(
             ["/usr/bin/osascript", "-l", "JavaScript", "-e", PROGRESS_WINDOW_JS, message, str(status)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         state.log(f"progress window started (pid {self.proc.pid})")
 
+    def _use_plain_dialog(self, why: str) -> None:
+        self.fallback = True
+        state.log(f"progress window not usable ({why}); trail: {self._trail() or 'none'}")
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc = subprocess.Popen(["/usr/bin/osascript", "-e", PLAIN_DIALOG, self.message, self.status],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _trail(self) -> str:
+        try:
+            return pathlib.Path(self.status + ".window").read_text().strip()
+        except OSError:
+            return ""
+
     def stopped(self) -> bool:
-        """True once the user has pressed Stop. If the window itself failed, fall back to a plain dialog."""
-        code = self.proc.poll()
-        if not self.reported:
-            try:
-                note = pathlib.Path(self.status + ".window")
-                state.log(f"progress window reports: {note.read_text()}")
-                note.unlink()
-                self.reported = True
-            except OSError:
-                pass
-        if self.closed or code is None:
+        """True once the user has pressed Stop. If the window does not come up within a few
+        seconds, or dies, switch to the plain dialog instead."""
+        if self.closed:
             return False
+        code = self.proc.poll()
+        if self.fallback:
+            return code == 0
         if code == 0:
             return True
-        if not self.fallback:
-            self.fallback = True
+        if code is not None:
             err = self.proc.stderr.read() if self.proc.stderr else ""
-            state.log(f"progress window failed (code {code}): {err.strip()[-500:]}")
-            self.proc = subprocess.Popen(
-                ["/usr/bin/osascript", "-e", PLAIN_DIALOG,
-                 self.message + "\n\n(The progress bar could not be shown; this is still working.)"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._use_plain_dialog(f"exited with code {code}: {err.strip()[-300:]}")
+        elif "shown visible=true" in self._trail():
+            if not self.reported:
+                self.reported = True
+                state.log("progress window is up")
+        elif time.time() - self.started > 6:
+            self._use_plain_dialog("did not appear within 6 seconds")
         return False
 
     def close(self) -> None:
