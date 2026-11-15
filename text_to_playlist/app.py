@@ -120,15 +120,30 @@ def run() -> int:
     return 0
 
 
+def copy_report() -> None:
+    """Put the recent log on the clipboard so a failure can be pasted straight into a chat."""
+    try:
+        lines = (state.CONFIG_DIR / "app.log").read_text().splitlines()[-60:]
+        ui.copy_to_clipboard("Text to Playlist log:\n" + "\n".join(lines))
+    except OSError:
+        pass
+
+
 def main() -> int:
     try:
         code = run()
         state.log(f"finished with code {code}")
-        return code
     except Exception:
+        code = 1
         state.log(traceback.format_exc())
-        ui.alert("Text to Playlist hit an unexpected error and stopped.\n\n" + traceback.format_exc()[-600:])
-        return 1
+        copy_report()
+        ui.alert("Text to Playlist hit an unexpected error and stopped.\n\nA report is on your clipboard: "
+                 "paste it into your chat with Claude.")
+        return code
+    if code not in (0, 2):
+        copy_report()
+        ui.alert("That didn't finish. A report is on your clipboard: paste it into your chat with Claude.")
+    return code
 
 
 if __name__ == "__main__":

@@ -59,3 +59,7 @@ def notify(message: str) -> None:
 
 def open_url(url: str) -> None:
     subprocess.run(["/usr/bin/open", url])
+
+
+def copy_to_clipboard(text: str) -> None:
+    subprocess.run(["/usr/bin/pbcopy"], input=text, text=True)

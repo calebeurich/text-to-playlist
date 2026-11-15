@@ -38,6 +38,29 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - "$APP"
 
+# A second, tiny app that updates the tool with a double-click (no Terminal needed).
+UPD="$HOME/Applications/Update Text to Playlist.app"
+REPO="$PWD"
+mkdir -p "$UPD/Contents/MacOS" "$HOME/.config/text-to-playlist"
+cat > "$UPD/Contents/MacOS/update" <<EOF
+#!/bin/bash
+export PATH="/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:\$PATH"
+LOG="\$HOME/.config/text-to-playlist/update.log"
+if { cd "$REPO" && git pull --ff-only && ./install.sh; } > "\$LOG" 2>&1; then open "$APP"; else pbcopy < "\$LOG"; osascript -e 'display dialog "The update failed. The details are on your clipboard: paste them into your chat with Claude." buttons {"OK"} default button 1'; fi
+EOF
+chmod +x "$UPD/Contents/MacOS/update"
+cat > "$UPD/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Update Text to Playlist</string>
+  <key>CFBundleIdentifier</key><string>local.text-to-playlist.update</string>
+  <key>CFBundleExecutable</key><string>update</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+
 echo "3/3 Done."
 echo
 echo "Open 'Text to Playlist' from ~/Applications (or Spotlight)."
