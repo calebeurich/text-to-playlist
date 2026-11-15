@@ -5,6 +5,12 @@ cd "$(dirname "$0")"
 
 [ "$(uname)" = "Darwin" ] || { echo "This installer is for macOS."; exit 1; }
 
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null || {
+  echo "Python 3.10 or newer is needed. Install it from https://www.python.org/downloads/ ,"
+  echo "then close this Terminal window, open a new one, and run ./install.sh again."
+  exit 1
+}
+
 SHARE="$HOME/.local/share/text-to-playlist"
 APP="$HOME/Applications/Text to Playlist.app"
 
