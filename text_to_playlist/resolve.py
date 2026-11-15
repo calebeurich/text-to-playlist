@@ -1,0 +1,179 @@
+"""Turn links and free-text recs into concrete Spotify track URIs."""
+from __future__ import annotations
+
+import json
+import re
+import urllib.request
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+
+from . import extract
+from .links import Link, find_links
+
+ALBUM_MODES = ("singles", "first", "full")
+
+
+@dataclass
+class Item:
+    uri: str
+    label: str
+
+
+@dataclass
+class Resolution:
+    items: list[Item] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+def norm(s: str) -> str:
+    s = re.sub(r"\(.*?\)|\[.*?\]", " ", s.lower())
+    s = re.sub(r"\s-\s.*$", "", s)  # "Song - 2011 Remaster"
+    s = re.sub(r"[^\w ]", "", s)
+    return " ".join(s.split())
+
+
+def sim(a: str, b: str) -> float:
+    return SequenceMatcher(None, norm(a), norm(b)).ratio()
+
+
+def _artists(obj: dict) -> str:
+    return ", ".join(a["name"] for a in obj.get("artists", []))
+
+
+def best_match(candidates: list[dict], title: str, artist: str) -> dict | None:
+    best, best_score = None, 0.0
+    for c in candidates:
+        t = sim(c["name"], title) if title else 1.0
+        a = max((sim(x["name"], artist) for x in c.get("artists", [])), default=0.0) if artist else 1.0
+        if t >= 0.6 and a >= 0.5 and t + a > best_score:
+            best, best_score = c, t + a
+    return best
+
+
+def _get_json(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=20) as r:
+        return json.loads(r.read())
+
+
+def _final_url(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.geturl()
+
+
+def apple_to_rec(link: Link, get_json=_get_json) -> extract.Rec | None:
+    """Look an Apple Music id up in Apple's public iTunes API (no login)."""
+    results = get_json(f"https://itunes.apple.com/lookup?id={link.id}").get("results", [])
+    if not results:
+        return None
+    r = results[0]
+    if link.kind == "track":
+        return extract.Rec(kind="track", title=r.get("trackName", ""), artist=r.get("artistName", ""),
+                           message_id=link.message_id)
+    return extract.Rec(kind="album", title=r.get("collectionName", ""), artist=r.get("artistName", ""),
+                       message_id=link.message_id)
+
+
+def _search(sp, kind: str, title: str, artist: str) -> dict | None:
+    field_name = "album" if kind == "album" else "track"
+    queries = []
+    if title and artist:
+        queries.append(f'{field_name}:"{title}" artist:"{artist}"')
+    queries.append(f"{title} {artist}".strip())
+    for q in queries:
+        hit = best_match(sp.search(q, kind), title, artist)
+        if hit:
+            return hit
+    return None
+
+
+def resolve(
+    sp, links: list[Link], recs: list[extract.Rec], *, album_mode: str = "singles", album_tracks: int = 2,
+    use_llm: bool = True, api_key: str | None = None, get_json=_get_json, final_url=_final_url,
+) -> Resolution:
+    out = Resolution()
+    albums: dict[str, dict] = {}
+    recs = list(recs)
+
+    def add_album(album_id: str) -> None:
+        if album_id not in albums:
+            albums[album_id] = sp.album(album_id)
+
+    def guarded(label: str, fn) -> None:
+        try:
+            fn()
+        except Exception as e:  # one bad link or lookup must not sink the whole sync
+            out.unresolved.append(f"{label} ({type(e).__name__}: {e})")
+
+    def handle_link(link: Link) -> None:
+        if link.service == "spotify_short":
+            found = [l for l in find_links(final_url(link.url), link.message_id) if l.service == "spotify"]
+            if not found:
+                out.unresolved.append(link.url)
+            for l in found:
+                handle_link(l)
+        elif link.service == "apple":
+            rec = apple_to_rec(link, get_json)
+            recs.append(rec) if rec else out.unresolved.append(link.url)
+        elif link.kind == "track":
+            t = sp.track(link.id)
+            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}"))
+        elif link.kind == "album":
+            add_album(link.id)
+        else:
+            out.notes.append(f"Skipped {link.kind} link: {link.url}")
+
+    def handle_rec(rec: extract.Rec) -> None:
+        label = " - ".join(x for x in (rec.title, rec.artist) if x)
+        if rec.kind == "artist":
+            name = rec.artist or rec.title
+            hits = [t for t in sp.search(f'artist:"{name}"', "track", limit=10)
+                    if any(sim(a["name"], name) >= 0.8 for a in t.get("artists", []))]
+            if not hits:
+                out.unresolved.append(f"artist: {name}")
+            for t in hits[:album_tracks]:
+                out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}"))
+            return
+        hit = _search(sp, rec.kind, rec.title, rec.artist)
+        if not hit:
+            out.unresolved.append(f"{rec.kind}: {label}")
+        elif rec.kind == "album":
+            add_album(hit["id"])
+        else:
+            out.items.append(Item(hit["uri"], f"{hit['name']} - {_artists(hit)}"))
+
+    for link in links:
+        guarded(link.url, lambda: handle_link(link))
+    for rec in recs:
+        guarded(f"{rec.kind}: {rec.title} {rec.artist}", lambda: handle_rec(rec))
+
+    # ---- albums -> tracks ---------------------------------------------------
+    picks: dict[str, list[int]] = {}
+    if album_mode == "singles" and albums:
+        if use_llm:
+            try:
+                picks = extract.pick_standouts(
+                    [{"id": i, "name": a["name"], "artist": _artists(a),
+                      "tracks": [t["name"] for t in a["tracks"]["items"]]} for i, a in albums.items()],
+                    album_tracks, api_key,
+                )
+            except Exception as e:
+                out.notes.append(f"Could not pick album singles ({e}); using first tracks instead.")
+        else:
+            out.notes.append("No Claude API key: album singles mode fell back to first tracks.")
+    for album_id, a in albums.items():
+        tracks = a["tracks"]["items"]
+        if album_mode == "full":
+            chosen = list(range(1, len(tracks) + 1))
+        else:
+            chosen = list(picks.get(album_id, []))
+            chosen += [n for n in range(1, len(tracks) + 1) if n not in chosen]  # pad with opening tracks
+            chosen = chosen[:album_tracks]
+        for n in chosen:
+            t = tracks[n - 1]
+            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(a)} (from the album {a['name']})"))
+
+    seen: set[str] = set()
+    out.items = [i for i in out.items if not (i.uri in seen or seen.add(i.uri))]
+    return out
