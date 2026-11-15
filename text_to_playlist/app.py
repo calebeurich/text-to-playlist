@@ -80,9 +80,10 @@ def menu(cfg: dict, n_chats: int) -> str | None:
         f"Review songs before adding: {'ON' if cfg.get('review', True) else 'OFF'}",
         f"Albums: {album_label(cfg)}",
         "Re-read a chat from the start...",
+        "Nicknames and notes for the AI...",
     ]
     picked = ui.choose("What would you like to do?", items, multiple=False, preselect="first")
-    return ["sync", "chats", "review", "albums", "reset"][picked[0]] if picked else None
+    return ["sync", "chats", "review", "albums", "reset", "notes"][picked[0]] if picked else None
 
 
 def sync_chat(c: dict, cfg: dict) -> str:
@@ -194,6 +195,9 @@ def run() -> int:
                 state.save(CONFIG, cfg)
         elif action == "reset":
             reset_chat()
+        elif action == "notes":
+            ui.open_text_file(str(state.notes_file()))
+            ui.alert("The notes file is open in TextEdit. Add one note per line, save, then come back here.")
         else:
             break
 

@@ -58,3 +58,25 @@ def log(message: str) -> None:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n")
     except OSError:
         pass
+
+
+NOTES_TEMPLATE = """# Notes for the AI that reads your chats. One per line. Lines starting with # are ignored.
+# Examples:
+#   Biggie = The Notorious B.I.G.
+#   Alex Smith is a friend, not a musician
+"""
+
+
+def notes_file() -> Path:
+    f = CONFIG_DIR / "notes.txt"
+    if not f.exists():
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        f.write_text(NOTES_TEMPLATE)
+    return f
+
+
+def read_notes() -> str:
+    f = CONFIG_DIR / "notes.txt"
+    if not f.exists():
+        return ""
+    return "\n".join(l for l in f.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#"))

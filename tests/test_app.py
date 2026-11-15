@@ -51,8 +51,8 @@ def test_resolve_modes():
             extract.Rec(kind="track", title="Heroes", artist="David Bowie", message_id=1),
             extract.Rec(kind="track", title="Nonexistent Song", artist="Nobody", message_id=1)]
     r = resolve.resolve(sp, links, recs, album_mode="first", album_tracks=2, use_llm=False)
-    assert [i.uri for i in r.items] == ["spotify:track:" + T, "spotify:track:vamp", "spotify:track:remaster",
-                                        "spotify:track:blonde1", "spotify:track:blonde2"]
+    assert sorted(i.uri for i in r.items) == sorted(["spotify:track:" + T, "spotify:track:vamp", "spotify:track:remaster",
+                                                     "spotify:track:blonde1", "spotify:track:blonde2"])
     assert r.unresolved == ["track: Nonexistent Song - Nobody"] and len(r.notes) == 1
     full = resolve.resolve(sp, links[1:2], [], album_mode="full", use_llm=False)
     assert len(full.items) == 4
@@ -265,3 +265,20 @@ def test_title_found_as_album_when_not_a_track():
     r = resolve.resolve(FakeSpotify(), [], [extract.Rec(kind="track", title="Blonde", artist="Frank Ocean", message_id=1)],
                         album_mode="first", album_tracks=1, use_llm=False)
     assert [i.uri for i in r.items] == ["spotify:track:blonde1"] and r.unresolved == []
+
+
+def test_items_follow_chat_order_and_wrong_artist_is_recovered(tmp_path, monkeypatch):
+    sp = FakeSpotify()
+    sp.catalog.append({"uri": "spotify:track:girl", "name": "You Are Every Girl to Me", "artists": [{"name": "MJ Lenderman"}]})
+    links = find_links(f"https://open.spotify.com/album/{A}", 5) + find_links(f"https://open.spotify.com/track/{T}", 9)
+    recs = [extract.Rec(kind="track", title="You Are Every Girl to Me", artist="Geese", message_id=7),
+            extract.Rec(kind="track", title="Vampire Empire", artist="Big Thief", message_id=2)]
+    r = resolve.resolve(sp, links, recs, album_mode="first", album_tracks=1, use_llm=False)
+    assert [i.uri for i in r.items] == ["spotify:track:vamp", "spotify:track:blonde1", "spotify:track:girl",
+                                        "spotify:track:" + T]
+    assert "chat said: Geese" in r.items[2].label and r.unresolved == []
+
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    assert state.read_notes() == ""
+    state.notes_file().write_text(state.NOTES_TEMPLATE + "O Rod = Olivia Rodrigo\n")
+    assert state.read_notes() == "O Rod = Olivia Rodrigo"

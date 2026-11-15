@@ -40,6 +40,10 @@ The first launch asks which chats the app may read. After that, opening the app 
 - **Albums**: how many tracks to take when someone recommends a whole album.
 - **Re-read a chat from the start**: either keep its playlist and only pick up songs that were missed,
   or forget it and build a new playlist.
+- **Nicknames and notes for the AI**: a text file of hints such as "Biggie = The Notorious B.I.G." or
+  "Alex Smith is a friend, not a musician".
+
+Songs are added in chat order, oldest first, so the newest recs are at the bottom of the playlist.
 
 Other settings live in `~/.config/text-to-playlist/config.json`: `include_dms` (offer one-to-one chats when
 choosing), `model` (Claude model, default `claude-haiku-5-5`, the cheapest; `claude-opus-5-5` is stronger on

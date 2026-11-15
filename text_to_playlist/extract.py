@@ -43,6 +43,8 @@ recommending, sharing, or saying they are into, so it can be added to a shared l
 
 - Use context to resolve references ("the new one from them", "track 3 on that") into real titles and artists.
 - Fix obvious typos and fill in the artist when you are confident who it is; leave artist empty if you are not.
+- Expand nicknames and in-jokes to the real name when you recognise them ("O Rod" is Olivia Rodrigo). \
+Names that are clearly the chat members' friends or other non-musicians are not recs.
 - kind is "album" when the title is an album or EP (use what you know about the release, not just how they phrased it), "artist" when they only name an artist, else "track".
 - Skip music that is only mentioned in passing, criticised, or is not actually being recommended.
 - Skip anything you cannot pin to a specific title or artist. "[music link]" marks a link that is handled \
@@ -89,9 +91,13 @@ def anonymize(messages: list[Message]) -> list[tuple[int, str, str]]:
     return out
 
 
-def extract_recs(messages: list[Message], api_key: str | None = None) -> list[Rec]:
+def extract_recs(messages: list[Message], api_key: str | None = None, notes: str = "") -> list[Rec]:
     lines = [f"[{i}] {who}: {text}" for i, who, text in anonymize(messages)]
     client = _client(api_key)
+    system = EXTRACT_SYSTEM
+    if notes.strip():
+        system += ("\n\nNotes from the playlist owner about this group (nicknames for artists, people who are "
+                   "friends rather than musicians, and so on). Apply them:\n" + notes.strip())
     recs: list[Rec] = []
     for start in range(0, len(lines), CHUNK):
         context = lines[max(0, start - CONTEXT):start]
@@ -101,7 +107,7 @@ def extract_recs(messages: list[Message], api_key: str | None = None) -> list[Re
             user += "EARLIER CONTEXT:\n" + "\n".join(context) + "\n\n"
         user += "NEW MESSAGES:\n" + "\n".join(new)
         valid = {m.rowid for m in messages[start:start + CHUNK]}
-        recs += [r for r in _parse(client, EXTRACT_SYSTEM, user, Extraction).recs if r.message_id in valid]
+        recs += [r for r in _parse(client, system, user, Extraction).recs if r.message_id in valid]
     return recs
 
 

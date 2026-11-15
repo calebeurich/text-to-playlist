@@ -98,3 +98,7 @@ def open_url(url: str) -> None:
 
 def copy_to_clipboard(text: str) -> None:
     subprocess.run(["/usr/bin/pbcopy"], input=text, text=True)
+
+
+def open_text_file(path: str) -> None:
+    subprocess.run(["/usr/bin/open", "-e", path])

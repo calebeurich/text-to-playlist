@@ -15,7 +15,7 @@ CONFIG, STATE = "config.json", "state.json"
 
 
 def plan_messages(chat_key: str, msgs: list[Message], sp, st: dict, *, album_mode="singles", album_tracks=2,
-                  links_only=False, api_key=None, log=lambda s: None) -> dict:
+                  links_only=False, api_key=None, notes="", log=lambda s: None) -> dict:
     """Work out which tracks the new messages point to. Changes nothing."""
     cs = state.chat_state(st, chat_key)
     plan = {"messages": len(msgs), "items": [], "unresolved": [], "notes": [],
@@ -27,7 +27,7 @@ def plan_messages(chat_key: str, msgs: list[Message], sp, st: dict, *, album_mod
     use_llm = bool(api_key or os.environ.get("ANTHROPIC_API_KEY")) and not links_only
     if use_llm:
         log("Reading messages for recs...")
-        recs = extract.extract_recs(msgs, api_key)
+        recs = extract.extract_recs(msgs, api_key, notes)
     log(f"Found {len(links)} music links and {len(recs)} written recs. Matching on Spotify...")
     res = resolve(sp, links, recs, album_mode=album_mode, album_tracks=album_tracks, use_llm=use_llm, api_key=api_key)
     already = set(cs["added_uris"])
@@ -77,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         result = plan_messages(
             payload["chat_key"], [Message(**m) for m in payload["messages"]], sp, st,
             album_mode=cfg.get("album_mode", "singles"), album_tracks=cfg.get("album_tracks", 2),
-            api_key=cfg.get("anthropic_api_key"), log=lambda s: print(s, file=sys.stderr),
+            api_key=cfg.get("anthropic_api_key"), notes=state.read_notes(),
+            log=lambda s: print(s, file=sys.stderr),
         )
     else:
         result = apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st)

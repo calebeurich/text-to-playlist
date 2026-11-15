@@ -17,6 +17,7 @@ ALBUM_MODES = ("singles", "first", "full")
 class Item:
     uri: str
     label: str
+    message_id: int = 0  # the message the rec came from; used to keep chat order
 
 
 @dataclass
@@ -96,11 +97,13 @@ def resolve(
 ) -> Resolution:
     out = Resolution()
     albums: dict[str, dict] = {}
+    album_msg: dict[str, int] = {}
     recs = list(recs)
 
-    def add_album(album_id: str) -> None:
+    def add_album(album_id: str, message_id: int) -> None:
         if album_id not in albums:
             albums[album_id] = sp.album(album_id)
+            album_msg[album_id] = message_id
 
     def guarded(label: str, fn) -> None:
         try:
@@ -120,23 +123,35 @@ def resolve(
             recs.append(rec) if rec else out.unresolved.append(link.url)
         elif link.kind == "track":
             t = sp.track(link.id)
-            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}"))
+            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}", link.message_id))
         elif link.kind == "album":
-            add_album(link.id)
+            add_album(link.id, link.message_id)
         else:
             out.notes.append(f"Skipped {link.kind} link: {link.url}")
 
-    def add_artist(name: str) -> bool:
+    def add_artist(name: str, message_id: int) -> bool:
         hits = [t for t in sp.search(f'artist:"{name}"', "track", limit=10)
                 if any(sim(x["name"], name) >= 0.8 for x in t.get("artists", []))]
         for t in hits[:album_tracks]:
-            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}"))
+            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)}", message_id))
         return bool(hits)
+
+    def title_only(rec: extract.Rec) -> bool:
+        """The chat may credit the wrong artist. For a distinctive title (3+ words),
+        accept a near-exact title match by someone else, and say so in the label."""
+        if not rec.artist or len(norm(rec.title).split()) < 3:
+            return False
+        for t in sp.search(rec.title, "track"):
+            if sim(t["name"], rec.title) >= 0.9:
+                out.items.append(Item(t["uri"], f"{t['name']} - {_artists(t)} (chat said: {rec.artist})",
+                                      rec.message_id))
+                return True
+        return False
 
     def handle_rec(rec: extract.Rec) -> None:
         label = " - ".join(x for x in (rec.title, rec.artist) if x)
         if rec.kind == "artist":
-            if not add_artist(rec.artist or rec.title):
+            if not add_artist(rec.artist or rec.title, rec.message_id):
                 out.unresolved.append(f"artist: {rec.artist or rec.title}")
             return
         # People (and the model) often don't say whether a title is a song or an album,
@@ -148,12 +163,12 @@ def resolve(
             hit = _search(sp, kind, rec.title, rec.artist)
         if not hit:
             # a bare name with no artist is often a band the model took for a song title
-            if not (not rec.artist and add_artist(rec.title)):
+            if not (not rec.artist and add_artist(rec.title, rec.message_id)) and not title_only(rec):
                 out.unresolved.append(f"{rec.kind}: {label}")
         elif kind == "album":
-            add_album(hit["id"])
+            add_album(hit["id"], rec.message_id)
         else:
-            out.items.append(Item(hit["uri"], f"{hit['name']} - {_artists(hit)}"))
+            out.items.append(Item(hit["uri"], f"{hit['name']} - {_artists(hit)}", rec.message_id))
 
     for link in links:
         guarded(link.url, lambda: handle_link(link))
@@ -184,8 +199,10 @@ def resolve(
             chosen = chosen[:album_tracks]
         for n in chosen:
             t = tracks[n - 1]
-            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(a)} (from the album {a['name']})"))
+            out.items.append(Item(t["uri"], f"{t['name']} - {_artists(a)} (from the album {a['name']})",
+                                  album_msg[album_id]))
 
+    out.items.sort(key=lambda i: i.message_id)  # chat order: oldest rec first, newest last
     seen: set[str] = set()
     out.items = [i for i in out.items if not (i.uri in seen or seen.add(i.uri))]
     return out
