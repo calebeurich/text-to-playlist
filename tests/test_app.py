@@ -367,7 +367,7 @@ def test_spotify_waits_out_rate_limits_and_caches(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
     monkeypatch.setattr(spotify.time, "sleep", lambda s: None)
     calls, waits = [], []
-    replies = iter([(429, {}, {"Retry-After": "30"}),
+    replies = iter([(429, {}, {"retry-after": "30"}),
                     (200, {"tracks": {"items": [{"id": "1", "uri": "u", "name": "N", "artists": [{"name": "A", "x": 1}],
                                                  "big": "dropped"}]}}, {})])
 
@@ -385,7 +385,34 @@ def test_spotify_waits_out_rate_limits_and_caches(tmp_path, monkeypatch):
     sp.flush()
     assert spotify.Spotify("cid").search("q", "track") == want and len(calls) == 2  # and survives a restart
 
-    monkeypatch.setattr(spotify, "_http", lambda *a, **k: (429, {}, {"Retry-After": "7200"}))
+    monkeypatch.setattr(spotify, "_http", lambda *a, **k: (429, {}, {"retry-after": "72000"}))
     import pytest
-    with pytest.raises(spotify.SpotifyRateLimited, match="120 minute"):
+    with pytest.raises(spotify.SpotifyRateLimited, match="20 hour"):
         sp.search("other", "track")
+
+    # track links are looked up 50 at a time
+    urls = []
+    def batch_http(method, url, **kw):
+        urls.append(url)
+        ids = url.split("ids=")[1].split("%2C")
+        return 200, {"tracks": [{"id": i, "uri": "spotify:track:" + i, "name": i, "artists": []} for i in ids]}, {}
+    monkeypatch.setattr(spotify, "_http", batch_http)
+    sp.prefetch_tracks([f"id{n}" for n in range(120)])
+    assert len(urls) == 3 and sp.track("id119")["uri"] == "spotify:track:id119" and len(urls) == 3
+
+
+def test_http_headers_are_case_insensitive(monkeypatch):
+    import email.message
+    import io
+    import urllib.error
+
+    from text_to_playlist import spotify
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "777"
+
+    def boom(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many", hdrs, io.BytesIO(b""))
+
+    monkeypatch.setattr(spotify.urllib.request, "urlopen", boom)
+    status, _, headers = spotify._http("GET", "https://api.spotify.com/v1/x")
+    assert status == 429 and headers["retry-after"] == "777"

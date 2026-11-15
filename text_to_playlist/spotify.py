@@ -50,7 +50,9 @@ class SpotifyRateLimited(SpotifyError):
 
     def __init__(self, wait_seconds: int):
         mins = max(1, round(wait_seconds / 60))
-        RuntimeError.__init__(self, f"Spotify is rate-limiting this app. Try again in about {mins} minute(s).")
+        when = f"{mins} minute(s)" if mins < 90 else f"{round(mins / 60)} hour(s)"
+        RuntimeError.__init__(self, f"Spotify is rate-limiting this app. Try again in about {when}. "
+                                    "What was already looked up is saved, so the next try has less to do.")
         self.status = 429
 
 
@@ -67,11 +69,11 @@ def _http(method: str, url: str, *, headers=None, form=None, body=None) -> tuple
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             raw = r.read()
-            return r.status, (json.loads(raw) if raw else {}), dict(r.headers)
+            return r.status, (json.loads(raw) if raw else {}), {k.lower(): v for k, v in r.headers.items()}
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
         if e.code == 429:
-            return 429, {}, dict(e.headers)
+            return 429, {}, {k.lower(): v for k, v in e.headers.items()}
         raise SpotifyError(e.code, raw) from e
 
 
@@ -81,7 +83,7 @@ class Spotify:
         self.token = state.load(TOKEN_FILE)
         self.cache = state.load(CACHE_FILE)  # answers to earlier lookups; a re-run costs no new requests
         self.unsaved = 0
-        self.delay = 0.1  # pause between requests; grows if Spotify pushes back
+        self.delay = 0.3  # pause between requests; grows if Spotify pushes back
         self.on_wait = lambda seconds: None
 
     # ---- auth -------------------------------------------------------------
@@ -143,14 +145,14 @@ class Spotify:
 
     def _call(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
         url = f"{API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
-        for _ in range(30):
+        for _ in range(8):
             time.sleep(self.delay)
             status, data, headers = _http(
                 method, url, headers={"Authorization": f"Bearer {self._access_token()}"}, body=body
             )
             if status != 429:
                 return data
-            wait = int(headers.get("Retry-After", "5") or 5)
+            wait = int(headers.get("retry-after", "5") or 5)
             if wait > MAX_WAIT:
                 self.flush()
                 raise SpotifyRateLimited(wait)
@@ -179,6 +181,22 @@ class Spotify:
             data = self._call("GET", "/search", {"q": query, "type": kind, "limit": limit})
             return [_slim(i) for i in data.get(f"{kind}s", {}).get("items", []) if i]
         return self._cached(f"search|{kind}|{limit}|{query}", fetch)
+
+    def prefetch_tracks(self, ids: list[str]) -> None:
+        """Look up many track links in a few requests (50 at a time) instead of one each."""
+        missing = [i for i in dict.fromkeys(ids) if f"track|{i}" not in self.cache]
+        for k in range(0, len(missing), 50):
+            try:
+                data = self._call("GET", "/tracks", {"ids": ",".join(missing[k:k + 50])})
+            except SpotifyRateLimited:
+                raise
+            except SpotifyError:
+                return  # batch lookup not offered to this app; they will be fetched one by one
+            for t in data.get("tracks", []):
+                if t:
+                    self.cache[f"track|{t['id']}"] = _slim(t)
+                    self.unsaved += 1
+        self.flush()
 
     def album(self, album_id: str) -> dict:
         return self._cached(f"album|{album_id}", lambda: _slim(self._call("GET", f"/albums/{album_id}")))

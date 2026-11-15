@@ -98,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     extract.MODEL = cfg.get("model", extract.MODEL)
     sp, st = Spotify(cfg["spotify_client_id"]), state.load(STATE)
     sp.on_wait = lambda secs: state.write_progress(
-        f"Spotify asked for a pause. Resuming in about {max(1, round(secs / 60))} minute(s)...")
+        "Spotify asked for a pause. Resuming in about "
+        + (f"{round(secs)} seconds..." if secs < 90 else f"{round(secs / 60)} minutes..."))
     try:
         if command == "plan":
             result = plan_messages(

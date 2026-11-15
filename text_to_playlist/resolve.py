@@ -180,6 +180,9 @@ def resolve(
             out.items.append(Item(hit["uri"], f"{hit['name']} - {_artists(hit)}", rec.message_id))
 
     step = "Step 2 of 2: finding the songs on Spotify"
+    progress(step, 0, len(links) + len(recs))
+    if hasattr(sp, "prefetch_tracks"):
+        sp.prefetch_tracks([l.id for l in links if l.service == "spotify" and l.kind == "track"])
     for n, link in enumerate(links):
         if n % 5 == 0:
             progress(step, n, len(links) + len(recs))
