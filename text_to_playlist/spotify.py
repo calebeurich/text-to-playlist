@@ -83,7 +83,7 @@ class Spotify:
         self.token = state.load(TOKEN_FILE)
         self.cache = state.load(CACHE_FILE)  # answers to earlier lookups; a re-run costs no new requests
         self.unsaved = 0
-        self.delay = 0.3  # pause between requests; grows if Spotify pushes back
+        self.delay = 0.5  # pause between requests; grows if Spotify pushes back
         self.on_wait = lambda seconds: None
 
     # ---- auth -------------------------------------------------------------
