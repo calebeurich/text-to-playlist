@@ -38,7 +38,8 @@ The first launch asks which chats the app may read. After that, opening the app 
 - **Choose which chats to read**: change the allow-list.
 - **Review songs before adding**: switch the review list off to add everything without asking.
 - **Albums**: how many tracks to take when someone recommends a whole album.
-- **Start a chat over**: forget a chat so its next sync re-reads it into a new playlist.
+- **Re-read a chat from the start**: either keep its playlist and only pick up songs that were missed,
+  or forget it and build a new playlist.
 
 Other settings live in `~/.config/text-to-playlist/config.json`: `include_dms` (offer one-to-one chats when
 choosing), `model` (Claude model, default `claude-haiku-5-5`, the cheapest; `claude-opus-5-5` is stronger on

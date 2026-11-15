@@ -43,7 +43,7 @@ recommending, sharing, or saying they are into, so it can be added to a shared l
 
 - Use context to resolve references ("the new one from them", "track 3 on that") into real titles and artists.
 - Fix obvious typos and fill in the artist when you are confident who it is; leave artist empty if you are not.
-- kind is "album" when they recommend a whole album/EP, "artist" when they only name an artist, else "track".
+- kind is "album" when the title is an album or EP (use what you know about the release, not just how they phrased it), "artist" when they only name an artist, else "track".
 - Skip music that is only mentioned in passing, criticised, or is not actually being recommended.
 - Skip anything you cannot pin to a specific title or artist. "[music link]" marks a link that is handled \
 elsewhere: do not create a rec for it.

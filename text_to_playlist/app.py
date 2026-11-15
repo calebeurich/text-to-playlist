@@ -79,7 +79,7 @@ def menu(cfg: dict, n_chats: int) -> str | None:
         "Choose which chats to read...",
         f"Review songs before adding: {'ON' if cfg.get('review', True) else 'OFF'}",
         f"Albums: {album_label(cfg)}",
-        "Start a chat over (re-read it into a new playlist)...",
+        "Re-read a chat from the start...",
     ]
     picked = ui.choose("What would you like to do?", items, multiple=False, preselect="first")
     return ["sync", "chats", "review", "albums", "reset"][picked[0]] if picked else None
@@ -139,12 +139,24 @@ def reset_chat() -> None:
     if not chats:
         ui.alert("No chat has been synced yet.")
         return
-    picked = ui.choose("Which chat should start over?\nIts next sync re-reads it and makes a new playlist.",
+    picked = ui.choose("Which chat should be read again from the start?",
                        [v.get("name", k) for k, v in chats], multiple=False)
-    if picked:
-        del st["chats"][chats[picked[0]][0]]
-        state.save(STATE, st)
-        ui.alert("Done. The old playlist is still in Spotify; delete it there if you don't want it.")
+    if not picked:
+        return
+    key = chats[picked[0]][0]
+    how = ui.alert("Keep playlist: re-read the chat and only offer songs that aren't in its playlist yet "
+                   "(use this to pick up songs that were missed).\n\n"
+                   "New playlist: forget everything and build a fresh playlist.",
+                   ("Cancel", "New playlist", "Keep playlist"))
+    if how == "Keep playlist":
+        st["chats"][key]["last_rowid"] = 0
+    elif how == "New playlist":
+        del st["chats"][key]
+    else:
+        return
+    state.save(STATE, st)
+    ui.alert("Done. Choose 'Sync now' to read it again."
+             + (" The old playlist is still in Spotify; delete it there." if how == "New playlist" else ""))
 
 
 def run() -> int:

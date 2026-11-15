@@ -139,12 +139,18 @@ def resolve(
             if not add_artist(rec.artist or rec.title):
                 out.unresolved.append(f"artist: {rec.artist or rec.title}")
             return
-        hit = _search(sp, rec.kind, rec.title, rec.artist)
+        # People (and the model) often don't say whether a title is a song or an album,
+        # so if it isn't found as one, try the other before giving up.
+        kind = rec.kind
+        hit = _search(sp, kind, rec.title, rec.artist)
+        if not hit:
+            kind = "album" if rec.kind == "track" else "track"
+            hit = _search(sp, kind, rec.title, rec.artist)
         if not hit:
             # a bare name with no artist is often a band the model took for a song title
-            if not (rec.kind == "track" and not rec.artist and add_artist(rec.title)):
+            if not (not rec.artist and add_artist(rec.title)):
                 out.unresolved.append(f"{rec.kind}: {label}")
-        elif rec.kind == "album":
+        elif kind == "album":
             add_album(hit["id"])
         else:
             out.items.append(Item(hit["uri"], f"{hit['name']} - {_artists(hit)}"))

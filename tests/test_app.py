@@ -259,3 +259,9 @@ def test_contact_names_label_unnamed_chats(db, tmp_path):
     chats = imessage.list_chats(imessage.connect(db.path), contacts=contacts)
     assert chats[0].name == "Sam, Ana, +14155559999"
     assert imessage.load_contacts(tmp_path / "missing") == {}
+
+
+def test_title_found_as_album_when_not_a_track():
+    r = resolve.resolve(FakeSpotify(), [], [extract.Rec(kind="track", title="Blonde", artist="Frank Ocean", message_id=1)],
+                        album_mode="first", album_tracks=1, use_llm=False)
+    assert [i.uri for i in r.items] == ["spotify:track:blonde1"] and r.unresolved == []
