@@ -16,13 +16,22 @@ def _osa(script: str, *args: str) -> str | None:
     return p.stdout.rstrip("\n")
 
 
+# Builds an AppleScript list from argv items 2..n (argv item 1 is always the prompt).
+ARGS_TO_LIST = (
+    'set opts to {}\n'
+    'repeat with i from 2 to (count of argv)\n'
+    'set end of opts to (item i of argv) as text\n'
+    'end repeat\n'
+)
+
+
 def choose(prompt: str, items: list[str]) -> list[int]:
     """Show a pick-list; returns the chosen indexes (empty if cancelled)."""
     numbered = [f"{i}. {s}" for i, s in enumerate(items, 1)]
     out = _osa(
-        'on run argv\n'
+        'on run argv\n' + ARGS_TO_LIST +
         'tell me to activate\n'
-        'set picked to choose from list (rest of argv) with title "Text to Playlist" '
+        'set picked to choose from list opts with title "Text to Playlist" '
         'with prompt (item 1 of argv) with multiple selections allowed\n'
         'if picked is false then error number -128\n'
         "set AppleScript's text item delimiters to linefeed\n"
@@ -44,11 +53,13 @@ def ask(prompt: str, hidden: bool = False) -> str | None:
 
 
 def alert(message: str, buttons: tuple[str, ...] = ("OK",)) -> str | None:
-    """Returns the button pressed."""
+    """Returns the button pressed. The last button is the default."""
     return _osa(
-        'on run argv\ntell me to activate\n'
-        'return button returned of (display dialog (item 1 of argv) with title "Text to Playlist" '
-        'buttons (rest of argv) default button (count of (rest of argv)))\nend run',
+        'on run argv\n' + ARGS_TO_LIST +
+        'tell me to activate\n'
+        'set answer to display dialog (item 1 of argv) with title "Text to Playlist" '
+        'buttons opts default button (last item of opts)\n'
+        'return button returned of answer\nend run',
         message, *buttons,
     )
 
