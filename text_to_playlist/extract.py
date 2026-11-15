@@ -60,11 +60,12 @@ def _client(api_key: str | None) -> anthropic.Anthropic:
 
 
 def _parse(client, system: str, user: str, schema):
+    # Haiku has no server-side refusal fallback; the larger models do.
+    extra = {} if "haiku" in MODEL else {"betas": BETAS, "fallbacks": "default"}
     resp = client.beta.messages.parse(
         model=MODEL,
         max_tokens=16000,
-        betas=BETAS,
-        fallbacks="default",
+        **extra,
         system=system,
         messages=[{"role": "user", "content": user}],
         output_format=schema,

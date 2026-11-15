@@ -93,19 +93,31 @@ def test_cli_end_to_end(db, tmp_path, monkeypatch, capsys):
     assert sp.added == ["spotify:track:" + T, "spotify:track:blonde1"] and len(sp.playlists) == 1
 
 
-def test_reader_outputs_aliased_json(db, capsys):
+def test_reader_enforces_allow_list(db, capsys, tmp_path, monkeypatch):
     import json
 
     from text_to_playlist import reader
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path / "data")
     db.chat(1, "Music Heads")
+    db.chat(2, "Family")
     db.msg(1, "hello", NOW - 100, handle_id=1)
     db.msg(1, "mine", NOW - 90, from_me=1)
-    assert reader.main(["list", "--db", str(db.path)]) == 0
-    chats = json.loads(capsys.readouterr().out)
-    assert chats[0]["name"] == "Music Heads" and chats[0]["rowids"] == [1]
-    assert reader.main(["fetch", "--db", str(db.path), "--rowids", "1"]) == 0
+    db.msg(2, "private", NOW - 80)
+    base = ["--db", str(db.path)]
+    assert reader.main(["list", *base]) == 0 and json.loads(capsys.readouterr().out) == []
+    assert reader.main(["fetch", *base, "--key", "name:Music Heads"]) == 3  # nothing allowed yet
+    capsys.readouterr()
+    assert reader.main(["list", "--all", *base]) == 0
+    assert {c["name"] for c in json.loads(capsys.readouterr().out)} == {"Music Heads", "Family"}
+
+    state.save_allowed(["name:Music Heads"])
+    assert reader.main(["list", *base]) == 0
+    assert [c["name"] for c in json.loads(capsys.readouterr().out)] == ["Music Heads"]
+    assert reader.main(["fetch", *base, "--key", "name:Music Heads"]) == 0
     out = capsys.readouterr().out
     assert [m["sender"] for m in json.loads(out)] == ["Person A", "me"] and "+1555" not in out
+    assert reader.main(["fetch", *base, "--key", "name:Family"]) == 3
+    assert "private" not in capsys.readouterr().out
     assert reader.main(["list", "--db", str(db.path) + ".missing"]) == 2
 
 
@@ -119,41 +131,50 @@ def test_syncer_profile_walls_off_home():
 
 
 def test_app_flow(db, tmp_path, monkeypatch):
+    import contextlib
+    import io
     import json
 
     from text_to_playlist import app, reader, sandbox, syncer, ui
     monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(state, "DATA_DIR", tmp_path / "data")
     state.save("config.json", {"spotify_client_id": "cid"})
     db.chat(1, "Music Heads")
     db.chat(2, "Other")
     db.msg(1, f"https://open.spotify.com/track/{T}", NOW - 100)
-    db.msg(2, "nothing here", NOW - 50)
-    sp, shown = FakeSpotify(), []
+    db.msg(2, f"https://open.spotify.com/album/{A}", NOW - 50)
+    sp, shown, prompts = FakeSpotify(), [], []
 
     def fake_read(args):
-        import contextlib
-        import io
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            assert reader.main([args[0], "--db", str(db.path), *args[1:]]) == 0
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = reader.main([args[0], "--db", str(db.path), *args[1:]])
+        if code:
+            raise sandbox.SandboxError(err.getvalue(), code)
         return json.loads(buf.getvalue())
 
     def fake_sync(payload):
         msgs = [imessage.Message(**m) for m in payload["messages"]]
         return syncer.sync_messages(payload["chat_key"], payload["chat_name"], msgs, sp, state.load("state.json"))
 
+    def fake_choose(prompt, items):
+        prompts.append(prompt)
+        return [items.index("Music Heads")]
+
     monkeypatch.setattr(sandbox, "read", fake_read)
     monkeypatch.setattr(sandbox, "sync", fake_sync)
     monkeypatch.setattr(sandbox, "verify_lockdown", lambda: [])
     monkeypatch.setattr(ui, "notify", lambda m: None)
     monkeypatch.setattr(ui, "alert", lambda m, buttons=("OK",): shown.append(m))
-    monkeypatch.setattr(ui, "choose", lambda prompt, items: [items.index("Music Heads")])
-    assert app.main() == 0
-    assert sp.added == ["spotify:track:" + T] and "added 1 track(s)" in shown[-1]
+    monkeypatch.setattr(ui, "choose", fake_choose)
 
-    # now linked: the list offers "update all" first, and a rerun adds nothing
-    monkeypatch.setattr(ui, "choose", lambda prompt, items: [0] if items[0] == app.SYNC_ALL else [])
-    assert app.main() == 0 and len(sp.added) == 1
+    # first launch: choose allowed chats, then only that chat is synced
+    assert app.main() == 0
+    assert state.load_allowed() == ["name:Music Heads"] and len(prompts) == 1
+    assert sp.added == ["spotify:track:" + T] and "added 1 track(s)" in shown[-1] and "Other" not in shown[-1]
+
+    # later launches: no picker, nothing re-added
+    assert app.main() == 0 and len(prompts) == 1 and len(sp.added) == 1
 
     # failing safety check stops before anything is read
     monkeypatch.setattr(sandbox, "verify_lockdown", lambda: ["leak"])

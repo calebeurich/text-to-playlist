@@ -13,7 +13,6 @@ from .spotify import REDIRECT_URI
 
 CONFIG, STATE = "config.json", "state.json"
 FDA_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-SYNC_ALL = "Update all my playlists"
 
 
 def first_run(cfg: dict) -> bool:
@@ -42,6 +41,37 @@ def summarize(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def read_or_explain(args: list[str]) -> list[dict] | None:
+    try:
+        return sandbox.read(args)
+    except sandbox.SandboxError as e:
+        if e.code == 2:
+            if ui.alert("Text to Playlist needs permission to read Messages.\n\nIn the window that opens, switch on "
+                        "'Text to Playlist' under Full Disk Access, then open the app again.",
+                        ("Cancel", "Open Settings")) == "Open Settings":
+                ui.open_url(FDA_PANE)
+        else:
+            ui.alert(f"Could not read Messages:\n{e}")
+        return None
+
+
+def pick_allowed(cfg: dict) -> list[str] | None:
+    """Let the user choose which chats the app may ever read. Only chat names are loaded here."""
+    chats = read_or_explain(["list", "--all"] + (["--dms"] if cfg.get("include_dms") else []))
+    if chats is None:
+        return None
+    shown = chats[: cfg.get("list_size", 40)]
+    current = set(state.load_allowed())
+    labels = [("★ " if c["key"] in current else "") + c["name"][:70] for c in shown]
+    picked = ui.choose("Which chats may this app read? It will never open any other chat.\n"
+                       "(Hold Command to select more than one. ★ = currently allowed.)", labels)
+    if not picked:
+        return None
+    keys = [shown[i]["key"] for i in picked]
+    state.save_allowed(keys)
+    return keys
+
+
 def main() -> int:
     cfg = state.load(CONFIG)
     if not cfg.get("spotify_client_id") and not first_run(cfg):
@@ -52,51 +82,32 @@ def main() -> int:
         ui.alert("Stopped: the safety check failed, so nothing was read or sent.\n\n" + "\n".join(problems))
         return 3
 
-    try:
-        chats = sandbox.read(["list"] + (["--dms"] if cfg.get("include_dms") else []))
-    except sandbox.SandboxError as e:
-        if e.code == 2:
-            if ui.alert("Text to Playlist needs permission to read Messages.\n\nIn the window that opens, switch on "
-                        "'Text to Playlist' under Full Disk Access, then open the app again.",
-                        ("Cancel", "Open Settings")) == "Open Settings":
-                ui.open_url(FDA_PANE)
-        else:
-            ui.alert(f"Could not read Messages:\n{e}")
+    if not state.load_allowed() and not pick_allowed(cfg):
+        return 2
+    todo = read_or_explain(["list"])  # allowed chats only
+    if todo is None:
         return 2
 
     st = state.load(STATE)
-    linked = {k for k, v in st.get("chats", {}).items() if v.get("playlist_id")}
-    shown = chats[: cfg.get("list_size", 25)]
-    labels = [("★ " if c["key"] in linked else "") + c["name"][:70] for c in shown]
-    if linked:
-        labels.insert(0, SYNC_ALL)
-    picked = ui.choose("Which chat should I pull song recs from?", labels)
-    if not picked:
-        return 0
-    if linked and 0 in picked:
-        todo = [c for c in chats if c["key"] in linked]
-    else:
-        offset = 1 if linked else 0
-        todo = [shown[i - offset] for i in picked]
-
-    ui.notify(f"Syncing {len(todo)} chat(s)...")
+    ui.notify(f"Checking {len(todo)} chat(s) for new song recs...")
     results = []
     for c in todo:
-        cs = st.get("chats", {}).get(c["key"], {})
-        after = cs.get("last_rowid", 0)
+        after = st.get("chats", {}).get(c["key"], {}).get("last_rowid", 0)
         since = 0 if after else time.time() - cfg.get("since_days", 90) * 86400
         try:
-            msgs = sandbox.read(["fetch", "--rowids", ",".join(map(str, c["rowids"])), "--after", str(after),
-                                 "--since", str(since)])
+            msgs = sandbox.read(["fetch", "--key", c["key"], "--after", str(after), "--since", str(since)])
             results.append(sandbox.sync({"chat_key": c["key"], "chat_name": c["name"], "messages": msgs}))
         except sandbox.SandboxError as e:
             ui.alert(f"Syncing '{c['name']}' failed:\n\n{e}")
             return 1
 
     urls = [r["playlist_url"] for r in results if r.get("playlist_url")]
-    buttons = ("Done", "Open playlist") if len(urls) == 1 else ("Done",)
-    if ui.alert(summarize(results), buttons) == "Open playlist":
+    buttons = ("Change chats", "Open playlist", "Done") if len(urls) == 1 else ("Change chats", "Done")
+    choice = ui.alert(summarize(results) or "No allowed chats found.", buttons)
+    if choice == "Open playlist":
         ui.open_url(urls[0])
+    elif choice == "Change chats":
+        pick_allowed(cfg)
     return 0
 
 

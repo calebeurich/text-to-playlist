@@ -31,12 +31,13 @@ It understands Spotify links, Apple Music links, and plain-text recs ("you have 
 
 ## Use
 
-Open the app, pick a chat from the list, done. Chats that already have a playlist are starred, and
-"Update all my playlists" refreshes every one of them in one click.
+The first launch asks which chats the app may read. After that, opening the app checks those chats and
+adds any new recs to their playlists, with no questions. The result dialog has a "Change chats" button.
 
 Settings live in `~/.config/text-to-playlist/config.json`: `album_mode` (`singles`, `first` or `full`),
 `album_tracks` (default 2), `since_days` (how far back the first sync of a chat looks, default 90),
-`include_dms`.
+`include_dms` (offer one-to-one chats when choosing), `model` (Claude model, default
+`claude-opus-5-5`; `claude-haiku-5-5` is the cheapest).
 
 Album modes: `singles` asks Claude to pick the album's best-known tracks from its real track list,
 `first` takes the opening tracks, `full` adds the whole album.
@@ -50,7 +51,8 @@ The app is split into two halves that run in separate macOS sandboxes:
 | Reader | Read the iMessage database, read-only | Use the network at all |
 | Syncer | Talk to Claude and Spotify | Read anything in your home folder except its own code and config |
 
-The reader hands the syncer only the new messages of the chat you picked, with phone numbers and emails
+The reader only opens chats on your allow-list (stored where the syncer cannot change it) and hands the
+syncer only their new messages, with phone numbers and emails
 already replaced by "Person A", "Person B". On every launch the app tests both walls (it tries to reach
 the internet from the reader and to open the message database from the syncer) and refuses to run if
 either attempt succeeds.

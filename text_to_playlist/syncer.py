@@ -53,6 +53,7 @@ def main() -> int:
 
     payload = json.load(sys.stdin)
     cfg = state.load(CONFIG)
+    extract.MODEL = cfg.get("model", extract.MODEL)
     msgs = [Message(**m) for m in payload["messages"]]
     result = sync_messages(
         payload["chat_key"], payload["chat_name"], msgs, Spotify(cfg["spotify_client_id"]), state.load(STATE),
