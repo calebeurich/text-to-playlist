@@ -131,7 +131,7 @@ def sync_chat(c: dict, cfg: dict) -> str:
     busy = ui.progress(f"Adding {len(items)} song(s) to the '{name}' playlist...")
     try:
         done = sandbox.syncer("apply", {"chat_key": key, "chat_name": name, "items": items,
-                                        "last_rowid": plan["last_rowid"]})
+                                        "last_rowid": plan["last_rowid"], "oldest_ts": plan.get("oldest_ts", 0)})
     finally:
         busy.close()
     state.log(f"'{key}': added {len(done['added'])} tracks")

@@ -156,9 +156,12 @@ class Spotify:
     def create_playlist(self, name: str, description: str = "") -> dict:
         return self._call("POST", "/me/playlists", body={"name": name, "public": False, "description": description})
 
-    def add_tracks(self, playlist_id: str, uris: list[str]) -> None:
+    def add_tracks(self, playlist_id: str, uris: list[str], position: int | None = None) -> None:
+        """Append, or insert starting at `position` (0 = top), keeping the given order."""
         for i in range(0, len(uris), 100):
-            body = {"uris": uris[i:i + 100]}
+            body: dict = {"uris": uris[i:i + 100]}
+            if position is not None:
+                body["position"] = position + i
             try:  # endpoint was renamed /tracks -> /items in Spotify's Feb 2026 API changes
                 self._call("POST", f"/playlists/{playlist_id}/items", body=body)
             except SpotifyError as e:

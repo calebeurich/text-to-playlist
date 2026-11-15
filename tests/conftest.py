@@ -81,5 +81,8 @@ class FakeSpotify:
         self.playlists.append(name)
         return {"id": "pl1", "external_urls": {"spotify": "https://open.spotify.com/playlist/pl1"}}
 
-    def add_tracks(self, pid, uris):
-        self.added += uris
+    def add_tracks(self, pid, uris, position=None):
+        if position is None:
+            self.added += uris
+        else:
+            self.added[position:position] = uris

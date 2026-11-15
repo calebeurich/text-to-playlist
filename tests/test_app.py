@@ -159,7 +159,8 @@ def test_app_flow(db, tmp_path, monkeypatch):
         if command == "plan":
             msgs = [imessage.Message(**m) for m in payload["messages"]]
             return syncer.plan_messages(payload["chat_key"], msgs, sp, st, album_mode="first", album_tracks=1)
-        return syncer.apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st)
+        return syncer.apply_items(payload["chat_key"], payload["chat_name"], payload["items"], payload["last_rowid"], sp, st,
+                                  payload.get("oldest_ts", 0))
 
     class Busy:
         def __init__(self, m): pass
@@ -221,7 +222,7 @@ def test_playlist_id_saved_before_tracks_are_added(tmp_path, monkeypatch):
     from text_to_playlist import syncer
     monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
     sp = FakeSpotify()
-    sp.add_tracks = lambda pid, uris: (_ for _ in ()).throw(RuntimeError("network down"))
+    sp.add_tracks = lambda pid, uris, position=None: (_ for _ in ()).throw(RuntimeError("network down"))
     items = [{"uri": "spotify:track:x", "label": "X"}]
     try:
         syncer.apply_items("k", "Chat", items, 5, sp, state.load("state.json"))
@@ -326,3 +327,31 @@ def test_run_can_be_cancelled_and_times_out(monkeypatch, tmp_path):
         sandbox._run("p", ["-c", "import time; time.sleep(30)"], timeout=1)
     with pytest.raises(sandbox.SandboxError, match="boom"):
         sandbox._run("p", ["-c", "import sys; sys.exit('boom')"])
+
+
+def test_older_history_read_later_goes_on_top_in_order(tmp_path, monkeypatch):
+    from text_to_playlist import syncer
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    sp = FakeSpotify()
+    item = lambda name, ts: {"uri": f"spotify:track:{name}", "label": name, "ts": ts}
+    load = lambda: state.load("state.json")
+    syncer.apply_items("k", "Chat", [item("c", 300), item("d", 400)], 10, sp, load(), oldest_ts=250)
+    # a longer lookback later: a and b predate everything read so far; "missed" falls inside the covered span
+    syncer.apply_items("k", "Chat", [item("a", 100), item("b", 200), item("missed", 350)], 10, sp, load(), oldest_ts=50)
+    syncer.apply_items("k", "Chat", [item("e", 500)], 11, sp, load(), oldest_ts=450)
+    assert [u.split(":")[-1] for u in sp.added] == ["a", "b", "c", "d", "missed", "e"]
+    assert load()["chats"]["k"]["oldest_ts"] == 50
+
+
+def test_progress_file_and_time_ordering(tmp_path, monkeypatch):
+    from text_to_playlist import syncer
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    state.write_progress("Step 2 of 2: finding the songs on Spotify", 5, 20)
+    text = (tmp_path / "cfg" / "progress.txt").read_text()
+    assert "5 of 20" in text and text.count("▓") == 5
+    # the later-sent message has the LOWER row id; order must follow send time
+    msgs = [imessage.Message(1, 200.0, "me", f"https://open.spotify.com/album/{A}"),
+            imessage.Message(2, 100.0, "me", f"https://open.spotify.com/track/{T}")]
+    plan = syncer.plan_messages("k", msgs, FakeSpotify(), {}, album_mode="first", album_tracks=1)
+    assert [i["uri"] for i in plan["items"]] == ["spotify:track:" + T, "spotify:track:blonde1"]
+    assert plan["oldest_ts"] == 100.0

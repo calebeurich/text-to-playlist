@@ -97,6 +97,7 @@ def _search(sp, kind: str, title: str, artist: str, album: str = "") -> dict | N
 def resolve(
     sp, links: list[Link], recs: list[extract.Rec], *, album_mode: str = "singles", album_tracks: int = 2,
     use_llm: bool = True, api_key: str | None = None, get_json=_get_json, final_url=_final_url,
+    progress=lambda step, done=0, total=0: None,
 ) -> Resolution:
     out = Resolution()
     albums: dict[str, dict] = {}
@@ -178,10 +179,17 @@ def resolve(
         else:
             out.items.append(Item(hit["uri"], f"{hit['name']} - {_artists(hit)}", rec.message_id))
 
-    for link in links:
+    step = "Step 2 of 2: finding the songs on Spotify"
+    for n, link in enumerate(links):
+        if n % 5 == 0:
+            progress(step, n, len(links) + len(recs))
         guarded(link.url, lambda: handle_link(link))
-    for rec in recs:
+    n_links = len(links)
+    for n, rec in enumerate(recs):  # recs can grow above: Apple Music links are turned into recs
+        if n % 5 == 0:
+            progress(step, n_links + n, n_links + len(recs))
         guarded(f"{rec.kind}: {rec.title} {rec.artist}", lambda: handle_rec(rec))
+    progress("Almost done: double-checking misses and picking album tracks")
 
     # ---- second look: show the model what Spotify actually has for each miss -------
     if misses and use_llm:

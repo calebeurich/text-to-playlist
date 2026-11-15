@@ -53,20 +53,36 @@ def choose(prompt: str, items: list[str], multiple: bool = True, preselect: str 
 
 
 class progress:
-    """A small 'working...' window with a Stop button; stays up until close() is called."""
+    """A 'working...' window with a Stop button. It re-reads progress.txt every few seconds
+    and stays up until close() is called."""
+
+    SCRIPT = (
+        'on run argv\n'
+        'tell me to activate\n'
+        'repeat\n'
+        'set t to item 1 of argv\n'
+        'try\n'
+        'set t to t & return & return & (do shell script "cat " & quoted form of (item 2 of argv))\n'
+        'end try\n'
+        'set r to display dialog t with title "Text to Playlist" buttons {"Stop"} giving up after 6\n'
+        'if gave up of r is false then return "stop"\n'
+        'end repeat\n'
+        'end run'
+    )
 
     def __init__(self, message: str):
         self.closed = False
-        self.proc = subprocess.Popen(
-            ["/usr/bin/osascript", "-e",
-             'on run argv\ntell me to activate\n'
-             'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Stop"} '
-             'giving up after 14400\nend run', message],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        status = state.CONFIG_DIR / "progress.txt"
+        try:
+            status.unlink()
+        except OSError:
+            pass
+        self.proc = subprocess.Popen(["/usr/bin/osascript", "-e", self.SCRIPT, message, str(status)],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def stopped(self) -> bool:
-        """True once the user has pressed Stop."""
-        return not self.closed and self.proc.poll() is not None
+        """True once the user has pressed Stop (a crashed window does not count)."""
+        return not self.closed and self.proc.poll() == 0
 
     def close(self) -> None:
         self.closed = True

@@ -47,7 +47,9 @@ The first launch asks which chats the app may read. After that, opening the app 
 Recs that an exact search can't find get a second look: the model is shown Spotify's actual results and
 picks one or declines. Those appear in the review list marked "best guess for".
 
-Songs are added in chat order, oldest first, so the newest recs are at the bottom of the playlist.
+Songs are added in chat order, oldest first, so the newest recs are at the bottom of the playlist. If you
+start with a short lookback and later re-read the chat with a longer one (keeping the playlist), the older
+songs are inserted at the top.
 
 Other settings live in `~/.config/text-to-playlist/config.json`: `include_dms` (offer one-to-one chats when
 choosing), `model` (Claude model, default `claude-haiku-5-5`, the cheapest; `claude-opus-5-5` is stronger on

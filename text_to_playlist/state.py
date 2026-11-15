@@ -80,3 +80,16 @@ def read_notes() -> str:
     if not f.exists():
         return ""
     return "\n".join(l for l in f.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#"))
+
+
+def write_progress(step: str, done: int = 0, total: int = 0) -> None:
+    """One short status the progress window re-reads every few seconds."""
+    text = step
+    if total:
+        filled = round(20 * done / total)
+        text += f"\n{'▓' * filled}{'░' * (20 - filled)}  {done} of {total}"
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        (CONFIG_DIR / "progress.txt").write_text(text)
+    except OSError:
+        pass

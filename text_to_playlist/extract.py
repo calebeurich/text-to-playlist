@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
@@ -123,7 +124,8 @@ def anonymize(messages: list[Message]) -> list[tuple[int, str, str]]:
     return out
 
 
-def extract_recs(messages: list[Message], api_key: str | None = None, notes: str = "") -> list[Rec]:
+def extract_recs(messages: list[Message], api_key: str | None = None, notes: str = "",
+                 progress=lambda step, done=0, total=0: None) -> list[Rec]:
     lines = [f"[{i}] {who}: {text}" for i, who, text in anonymize(messages)]
     client = _client(api_key)
     system = EXTRACT_SYSTEM
@@ -138,8 +140,14 @@ def extract_recs(messages: list[Message], api_key: str | None = None, notes: str
             user += "EARLIER CONTEXT:\n" + "\n".join(context) + "\n\n"
         user += "NEW MESSAGES:\n" + "\n".join(lines[start:start + CHUNK])
         valid = {m.rowid for m in messages[start:start + CHUNK]}
-        return [r for r in _parse(client, system, user, Extraction).recs if r.message_id in valid]
+        found = [r for r in _parse(client, system, user, Extraction).recs if r.message_id in valid]
+        with lock:
+            done[0] += 1
+            progress("Step 1 of 2: reading the messages", min(done[0] * CHUNK, len(lines)), len(lines))
+        return found
 
+    lock, done = threading.Lock(), [0]
+    progress("Step 1 of 2: reading the messages", 0, len(lines))
     # Long histories are many chunks; read a few at a time so a full-history sync takes minutes, not an hour.
     with ThreadPoolExecutor(max_workers=4) as pool:
         return [r for chunk in pool.map(one_chunk, range(0, len(lines), CHUNK)) for r in chunk]
