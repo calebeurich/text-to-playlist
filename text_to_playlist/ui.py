@@ -84,7 +84,10 @@ function run(argv) {
   button.setFrame($.NSMakeRect(350, 12, 90, 32));
   var view = win.contentView;
   view.addSubview(heading); view.addSubview(status); view.addSubview(bar); view.addSubview(button);
+  win.setLevel(3);  // floating: stays visible above other windows without taking keyboard focus
+  win.setHidesOnDeactivate(false);
   win.makeKeyAndOrderFront(null);
+  win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
 
   var mode = $('kCFRunLoopDefaultMode'), last = '';
@@ -119,6 +122,7 @@ function run(argv) {
 # Used only if the window above fails to start: one plain dialog that never refreshes.
 PLAIN_DIALOG = (
     'on run argv\n'
+    'tell me to activate\n'
     'display dialog (item 1 of argv) with title "Text to Playlist" buttons {"Stop"} giving up after 14400\n'
     'end run'
 )
@@ -139,6 +143,7 @@ class progress:
         self.proc = subprocess.Popen(
             ["/usr/bin/osascript", "-l", "JavaScript", "-e", PROGRESS_WINDOW_JS, message, str(status)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        state.log(f"progress window started (pid {self.proc.pid})")
 
     def stopped(self) -> bool:
         """True once the user has pressed Stop. If the window itself failed, fall back to a plain dialog."""
