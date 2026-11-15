@@ -1,6 +1,7 @@
 """Native macOS dialogs via osascript. Strings are passed as arguments, never spliced into script text."""
 from __future__ import annotations
 
+import pathlib
 import re
 import subprocess
 
@@ -89,6 +90,8 @@ function run(argv) {
   win.makeKeyAndOrderFront(null);
   win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
+  $.NSString.stringWithString('visible=' + win.isVisible + ' screens=' + $.NSScreen.screens.count)
+    .writeToFileAtomicallyEncodingError(statusPath + '.window', true, 4, null);
 
   var mode = $('kCFRunLoopDefaultMode'), last = '';
   while (!stopped) {
@@ -134,8 +137,10 @@ class progress:
     def __init__(self, message: str):
         self.closed = False
         self.fallback = False
+        self.reported = False
         self.message = message
         status = state.CONFIG_DIR / "progress.txt"
+        self.status = str(status)
         try:
             status.unlink()
         except OSError:
@@ -148,6 +153,14 @@ class progress:
     def stopped(self) -> bool:
         """True once the user has pressed Stop. If the window itself failed, fall back to a plain dialog."""
         code = self.proc.poll()
+        if not self.reported:
+            try:
+                note = pathlib.Path(self.status + ".window")
+                state.log(f"progress window reports: {note.read_text()}")
+                note.unlink()
+                self.reported = True
+            except OSError:
+                pass
         if self.closed or code is None:
             return False
         if code == 0:

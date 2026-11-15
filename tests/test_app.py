@@ -323,6 +323,9 @@ def test_run_can_be_cancelled_and_times_out(monkeypatch, tmp_path):
     assert sandbox._run("p", ["-c", "import sys; print(sys.stdin.read().upper())"], stdin="hi").strip() == "HI"
     slow = "import sys, time; data = sys.stdin.read(); time.sleep(2.5); print(data.upper())"
     assert sandbox._run("p", ["-c", slow], stdin="slow").strip() == "SLOW"  # spans several polls
+    # the real failure: a slow-starting child and an input far bigger than a pipe buffer
+    late = "import sys, time; time.sleep(2.5); print(len(sys.stdin.read()))"
+    assert sandbox._run("p", ["-c", late], stdin="x" * 3_000_000).strip() == "3000000"
     with pytest.raises(sandbox.Cancelled):
         sandbox._run("p", ["-c", "import time; time.sleep(30)"], cancel=lambda: True)
     with pytest.raises(sandbox.SandboxError, match="Gave up"):

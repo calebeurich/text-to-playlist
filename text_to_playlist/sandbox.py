@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -49,23 +50,27 @@ def _run(profile: str, args: list[str], stdin: str | None = None, timeout: int =
     if not os.path.exists(SANDBOX_EXEC):
         raise SandboxError("macOS sandbox-exec not found; refusing to run unsandboxed.")
     state.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    p = subprocess.Popen([SANDBOX_EXEC, "-p", profile, sys.executable, *args], stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    deadline = time.time() + timeout
-    while True:
-        try:
-            out, err = p.communicate(stdin, timeout=1)
-            break
-        except subprocess.TimeoutExpired:
-            stdin = None  # already handed over; passing it again on the next poll is an error
-            if cancel and cancel():
-                p.kill()
-                p.communicate()
-                raise Cancelled() from None
-            if time.time() > deadline:
-                p.kill()
-                p.communicate()
-                raise SandboxError(f"Gave up after {timeout // 60} minutes. Try a shorter lookback.") from None
+    # The input goes through an unnamed temporary file, not a pipe. Feeding a pipe while also
+    # polling once a second can leave a large input half-written, and the child then waits forever.
+    with tempfile.TemporaryFile("w+") as feed:
+        feed.write(stdin or "")
+        feed.seek(0)
+        p = subprocess.Popen([SANDBOX_EXEC, "-p", profile, sys.executable, *args], stdin=feed,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + timeout
+        while True:
+            try:
+                out, err = p.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel and cancel():
+                    p.kill()
+                    p.communicate()
+                    raise Cancelled() from None
+                if time.time() > deadline:
+                    p.kill()
+                    p.communicate()
+                    raise SandboxError(f"Gave up after {timeout // 60} minutes. Try a shorter lookback.") from None
     if p.returncode != 0:
         raise SandboxError(err.strip()[-1500:] or f"exit code {p.returncode}", p.returncode)
     return out
