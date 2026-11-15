@@ -97,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = state.load(CONFIG)
     extract.MODEL = cfg.get("model", extract.MODEL)
     sp, st = Spotify(cfg["spotify_client_id"]), state.load(STATE)
+    sp.on_wait = lambda secs: state.write_progress(
+        f"Spotify asked for a pause. Resuming in about {max(1, round(secs / 60))} minute(s)...")
     try:
         if command == "plan":
             result = plan_messages(
@@ -112,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     except SpotifyRateLimited as e:
         print(e, file=sys.stderr)
         return 4
+    finally:
+        sp.flush()
     json.dump(result, sys.stdout)
     return 0
 

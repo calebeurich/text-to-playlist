@@ -26,6 +26,17 @@ REDIRECT_PORT = 8888
 REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
 SCOPE = "playlist-modify-private"
 TOKEN_FILE = "spotify_token.json"
+CACHE_FILE = "spotify_cache.json"
+MAX_WAIT = 15 * 60  # longest pause we will sit through when Spotify says "slow down"
+
+
+def _slim(obj: dict) -> dict:
+    """Keep only the fields the tool uses, so the lookup cache stays small."""
+    out = {k: obj[k] for k in ("id", "uri", "name") if k in obj}
+    out["artists"] = [{"name": a["name"]} for a in obj.get("artists", [])]
+    if "tracks" in obj:
+        out["tracks"] = {"items": [{"uri": t["uri"], "name": t["name"]} for t in obj["tracks"].get("items", [])]}
+    return out
 
 
 class SpotifyError(RuntimeError):
@@ -68,6 +79,10 @@ class Spotify:
     def __init__(self, client_id: str):
         self.client_id = client_id
         self.token = state.load(TOKEN_FILE)
+        self.cache = state.load(CACHE_FILE)  # answers to earlier lookups; a re-run costs no new requests
+        self.unsaved = 0
+        self.delay = 0.1  # pause between requests; grows if Spotify pushes back
+        self.on_wait = lambda seconds: None
 
     # ---- auth -------------------------------------------------------------
     def _store(self, tok: dict) -> None:
@@ -128,29 +143,48 @@ class Spotify:
 
     def _call(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> dict:
         url = f"{API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
-        for _ in range(6):
-            time.sleep(0.05)  # stay well under Spotify's per-app request rate
+        for _ in range(30):
+            time.sleep(self.delay)
             status, data, headers = _http(
                 method, url, headers={"Authorization": f"Bearer {self._access_token()}"}, body=body
             )
             if status != 429:
                 return data
-            wait = int(headers.get("Retry-After", "2") or 2)
-            if wait > 90:  # a long penalty: stop cleanly instead of hammering on
+            wait = int(headers.get("Retry-After", "5") or 5)
+            if wait > MAX_WAIT:
+                self.flush()
                 raise SpotifyRateLimited(wait)
+            self.delay = min(1.0, self.delay * 2)  # ease off for the rest of this run
+            self.on_wait(wait)
             time.sleep(wait + 1)
-        raise SpotifyRateLimited(120)
+        self.flush()
+        raise SpotifyRateLimited(MAX_WAIT)
+
+    def _cached(self, key: str, fetch):
+        if key not in self.cache:
+            self.cache[key] = fetch()
+            self.unsaved += 1
+            if self.unsaved >= 20:
+                self.flush()
+        return self.cache[key]
+
+    def flush(self) -> None:
+        if self.unsaved:
+            state.save(CACHE_FILE, self.cache)
+            self.unsaved = 0
 
     # ---- catalog ----------------------------------------------------------
     def search(self, query: str, kind: str, limit: int = 5) -> list[dict]:
-        data = self._call("GET", "/search", {"q": query, "type": kind, "limit": limit})
-        return [i for i in data.get(f"{kind}s", {}).get("items", []) if i]
+        def fetch():
+            data = self._call("GET", "/search", {"q": query, "type": kind, "limit": limit})
+            return [_slim(i) for i in data.get(f"{kind}s", {}).get("items", []) if i]
+        return self._cached(f"search|{kind}|{limit}|{query}", fetch)
 
     def album(self, album_id: str) -> dict:
-        return self._call("GET", f"/albums/{album_id}")
+        return self._cached(f"album|{album_id}", lambda: _slim(self._call("GET", f"/albums/{album_id}")))
 
     def track(self, track_id: str) -> dict:
-        return self._call("GET", f"/tracks/{track_id}")
+        return self._cached(f"track|{track_id}", lambda: _slim(self._call("GET", f"/tracks/{track_id}")))
 
     # ---- playlists --------------------------------------------------------
     def create_playlist(self, name: str, description: str = "") -> dict:

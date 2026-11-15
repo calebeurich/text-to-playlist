@@ -1,6 +1,7 @@
 """Use Claude to find free-text music recs and to pick standout album tracks."""
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -9,11 +10,13 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel
 
+from . import state
 from .imessage import Message
 from .links import strip_links
 
 MODEL = os.environ.get("TTP_MODEL", "claude-haiku-5-5")
 BETAS = ["server-side-fallback-2026-07-01"]
+CACHE_FILE = "extract_cache.json"
 CHUNK = 400  # messages per request
 CONTEXT = 15  # earlier messages repeated so references like "that album" resolve
 
@@ -140,13 +143,24 @@ def extract_recs(messages: list[Message], api_key: str | None = None, notes: str
             user += "EARLIER CONTEXT:\n" + "\n".join(context) + "\n\n"
         user += "NEW MESSAGES:\n" + "\n".join(lines[start:start + CHUNK])
         valid = {m.rowid for m in messages[start:start + CHUNK]}
-        found = [r for r in _parse(client, system, user, Extraction).recs if r.message_id in valid]
+        # Remember each batch's answer (keyed by a hash, not the text), so a sync that fails
+        # later on, e.g. at Spotify, does not pay to read the same messages again.
+        key = hashlib.sha256(f"{MODEL}\n{system}\n{user}".encode()).hexdigest()
+        with lock:
+            hit = cache.get(key)
+        if hit is None:
+            hit = [r.model_dump() for r in _parse(client, system, user, Extraction).recs]
+            with lock:
+                cache[key] = hit
+                state.save(CACHE_FILE, cache)
+        found = [r for r in (Rec(**d) for d in hit) if r.message_id in valid]
         with lock:
             done[0] += 1
             progress("Step 1 of 2: reading the messages", min(done[0] * CHUNK, len(lines)), len(lines))
         return found
 
     lock, done = threading.Lock(), [0]
+    cache = state.load(CACHE_FILE)
     progress("Step 1 of 2: reading the messages", 0, len(lines))
     # Long histories are many chunks; read a few at a time so a full-history sync takes minutes, not an hour.
     with ThreadPoolExecutor(max_workers=4) as pool:

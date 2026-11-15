@@ -357,3 +357,32 @@ def test_progress_file_and_time_ordering(tmp_path, monkeypatch):
     plan = syncer.plan_messages("k", msgs, FakeSpotify(), {}, album_mode="first", album_tracks=1)
     assert [i["uri"] for i in plan["items"]] == ["spotify:track:" + T, "spotify:track:blonde1"]
     assert plan["oldest_ts"] == 100.0
+
+
+def test_spotify_waits_out_rate_limits_and_caches(tmp_path, monkeypatch):
+    from text_to_playlist import spotify
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(spotify.time, "sleep", lambda s: None)
+    calls, waits = [], []
+    replies = iter([(429, {}, {"Retry-After": "30"}),
+                    (200, {"tracks": {"items": [{"id": "1", "uri": "u", "name": "N", "artists": [{"name": "A", "x": 1}],
+                                                 "big": "dropped"}]}}, {})])
+
+    def fake_http(method, url, **kw):
+        calls.append(url)
+        return next(replies)
+
+    monkeypatch.setattr(spotify, "_http", fake_http)
+    sp = spotify.Spotify("cid")
+    sp.token = {"refresh_token": "r", "access_token": "a", "expires_at": 9e12}
+    sp.on_wait = waits.append
+    want = [{"id": "1", "uri": "u", "name": "N", "artists": [{"name": "A"}]}]
+    assert sp.search("q", "track") == want and waits == [30] and len(calls) == 2
+    assert sp.search("q", "track") == want and len(calls) == 2  # second time comes from the cache
+    sp.flush()
+    assert spotify.Spotify("cid").search("q", "track") == want and len(calls) == 2  # and survives a restart
+
+    monkeypatch.setattr(spotify, "_http", lambda *a, **k: (429, {}, {"Retry-After": "7200"}))
+    import pytest
+    with pytest.raises(spotify.SpotifyRateLimited, match="120 minute"):
+        sp.search("other", "track")
