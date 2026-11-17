@@ -7,6 +7,9 @@ It understands Spotify links, Apple Music links, and plain-text recs ("you have 
 
 ## Setup (once, on your Mac)
 
+Needs macOS, Apple's command line tools (`xcode-select --install`), Python 3.10 or newer, a Spotify
+Premium account and a Claude API key.
+
 1. **Install**
 
    ```bash
@@ -18,7 +21,8 @@ It understands Spotify links, Apple Music links, and plain-text recs ("you have 
    ```
 
    This puts the tool in `~/.local/share/text-to-playlist` and builds `Text to Playlist.app` in
-   `~/Applications`. To update later, run `git pull` and then `./install.sh` again.
+   `~/Applications`, plus `Update Text to Playlist.app`, which pulls the latest code and reinstalls with a
+   double-click.
 
 2. **Spotify app** (needs Premium): at <https://developer.spotify.com/dashboard> create an app, add the
    redirect URI `http://127.0.0.1:8888/callback`, and tick "Web API". Copy the Client ID.
@@ -58,6 +62,19 @@ vague recs).
 Album modes: `singles` asks Claude to pick the album's best-known tracks from its real track list,
 `first` takes the opening tracks, `full` adds the whole album.
 
+## Spotify rate limits
+
+Spotify limits how many lookups a personal developer app can make, and heavy use can earn a time-out of
+many hours. The app paces itself at about two requests a second, waits out short pauses on its own, and
+saves every lookup so nothing is asked twice. If a long time-out hits mid-sync, it adds what it has
+(song links need no lookup), saves the rest, and picks them up on the next sync. For a very long chat
+history, start with "Last year" rather than "Everything".
+
+## Troubleshooting
+
+Every run is logged to `~/.config/text-to-playlist/app.log`. If a run fails, the recent log is copied to
+the clipboard. While a sync is running, `~/.config/text-to-playlist/progress.txt` holds the current step.
+
 ## How it is locked down
 
 The app is split into two halves that run in separate macOS sandboxes:
@@ -68,8 +85,7 @@ The app is split into two halves that run in separate macOS sandboxes:
 | Syncer | Talk to Claude and Spotify | Read anything in your home folder except its own code and config |
 
 The reader only opens chats on your allow-list (stored where the syncer cannot change it) and hands the
-syncer only their new messages, with phone numbers and emails
-already replaced by "Person A", "Person B". On every launch the app tests both walls (it tries to reach
+syncer only their new messages, with phone numbers and emails already replaced by "Person A", "Person B". On every launch the app tests both walls (it tries to reach
 the internet from the reader and to open the message database from the syncer) and refuses to run if
 either attempt succeeds.
 
@@ -79,7 +95,8 @@ either attempt succeeds.
   private playlists; it cannot see your listening history, library, or profile, or control playback. It only
   ever adds tracks, and only to playlists it created.
 - **On disk**: `~/.config/text-to-playlist/` holds the Spotify token, the API key, and which tracks were
-  already added per chat. Files are readable only by you. Songs you delete from a playlist are not re-added.
+  already added per chat, plus saved lookup results (song and album names, never message text). Files are
+  readable only by you. Songs you delete from a playlist are not re-added.
 
 ## Terminal version
 
